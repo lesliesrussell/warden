@@ -13,6 +13,7 @@ pub fn run(
     client: *ControlClient,
     filter: Filter,
     json_output: bool,
+    beam_label: ?u32,
 ) !void {
     var payload_buf: std.ArrayList(u8) = .empty;
     defer payload_buf.deinit(allocator);
@@ -54,6 +55,18 @@ pub fn run(
 
     const roots = obj.get("payload").?.object.get("roots").?.array;
 
+    // warden-xh7: print beam label when fan-out across multiple beams
+    if (beam_label) |bid| {
+        const lbl = try std.fmt.allocPrint(allocator, "beam {d}:\n", .{bid});
+        defer allocator.free(lbl);
+        try stdout.writeAll(lbl);
+    }
+
+    if (roots.items.len == 0) {
+        try stdout.writeAll("  (no processes)\n\n");
+        return;
+    }
+
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     const w = out.writer(allocator);
@@ -61,6 +74,7 @@ pub fn run(
     for (roots.items) |root| {
         try renderRoot(allocator, root, w);
     }
+    try w.writeByte('\n');
 
     try stdout.writeAll(out.items);
 }

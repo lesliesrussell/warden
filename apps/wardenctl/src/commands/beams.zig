@@ -4,7 +4,7 @@ const std = @import("std");
 const ControlClient = @import("../client.zig").ControlClient;
 
 // warden-39v
-pub fn run(allocator: std.mem.Allocator, client: *ControlClient, json_output: bool) !void {
+pub fn run(allocator: std.mem.Allocator, client: *ControlClient, json_output: bool, show_header: bool) !void {
     const resp_bytes = try client.request("beam.list");
     defer allocator.free(resp_bytes);
 
@@ -37,10 +37,13 @@ pub fn run(allocator: std.mem.Allocator, client: *ControlClient, json_output: bo
 
     const beams = obj.get("payload").?.object.get("beams").?.array;
 
-    const header = try std.fmt.allocPrint(allocator, "{s:<6} {s:<9} {s:<9} {s}\n",
-        .{ "BEAM", "VERSION", "UPTIME", "PROCS" });
-    defer allocator.free(header);
-    try stdout.writeAll(header);
+    // warden-xh7
+    if (show_header) {
+        const header = try std.fmt.allocPrint(allocator, "{s:<6} {s:<9} {s:<9} {s}\n",
+            .{ "BEAM", "VERSION", "UPTIME", "PROCS" });
+        defer allocator.free(header);
+        try stdout.writeAll(header);
+    }
 
     for (beams.items) |beam_val| {
         const b = beam_val.object;

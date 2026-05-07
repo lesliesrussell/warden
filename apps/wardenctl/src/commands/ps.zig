@@ -15,6 +15,7 @@ pub fn run(
     client: *ControlClient,
     filter: Filter,
     json_output: bool,
+    show_header: bool,
 ) !void {
     // Build payload JSON from active filters.
     var payload_buf: std.ArrayList(u8) = .empty;
@@ -70,11 +71,14 @@ pub fn run(
 
     const procs = obj.get("payload").?.object.get("processes").?.array;
 
-    const header = try std.fmt.allocPrint(allocator,
-        "{s:<6} {s:<6} {s:<20} {s:<12} {s:<10} {s}\n",
-        .{ "BEAM", "PID", "KIND", "STATE", "POLICY", "LAST ACTIVE" });
-    defer allocator.free(header);
-    try stdout.writeAll(header);
+    // warden-xh7: header only on first call when fan-out across multiple beams
+    if (show_header) {
+        const header = try std.fmt.allocPrint(allocator,
+            "{s:<6} {s:<6} {s:<20} {s:<12} {s:<10} {s}\n",
+            .{ "BEAM", "PID", "KIND", "STATE", "POLICY", "LAST ACTIVE" });
+        defer allocator.free(header);
+        try stdout.writeAll(header);
+    }
 
     for (procs.items) |proc_val| {
         const p = proc_val.object;

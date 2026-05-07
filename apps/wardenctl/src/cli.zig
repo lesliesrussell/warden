@@ -156,20 +156,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             std.mem.eql(u8, subcmd, "ps") or
             std.mem.eql(u8, subcmd, "topology");
 
+        // warden-xh7: fan-out with merged table (single header, all rows)
         if (is_fanout) {
-            const stdout = std.fs.File.stdout();
+            var first = true;
             for (sockets) |entry| {
                 var client = ControlClient.connect(allocator, entry.socket_path) catch continue;
                 defer client.close();
-
-                if (sockets.len > 1 and !opts.json_output) {
-                    const hdr = try std.fmt.allocPrint(
-                        allocator, "── beam {d}  ({s})\n", .{ entry.beam_id, entry.socket_path });
-                    defer allocator.free(hdr);
-                    try stdout.writeAll(hdr);
-                }
-
-                try dispatch(allocator, subcmd, sub_args, &client, opts);
+                try dispatchFanout(allocator, subcmd, sub_args, &client, opts, first, entry.beam_id);
+                first = false;
             }
             return;
         }
@@ -211,6 +205,27 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 }
 
+// warden-xh7: fan-out variant — single header on first call, beam label for topology
+fn dispatchFanout(
+    allocator: std.mem.Allocator,
+    subcmd: []const u8,
+    sub_args: []const []const u8,
+    client: *ControlClient,
+    opts: GlobalOpts,
+    first: bool,
+    beam_id: u32,
+) !void {
+    if (std.mem.eql(u8, subcmd, "beams")) {
+        try beams_cmd.run(allocator, client, opts.json_output, first);
+    } else if (std.mem.eql(u8, subcmd, "ps")) {
+        const filter = parsePsFilter(sub_args) catch return;
+        try ps_cmd.run(allocator, client, filter, opts.json_output, first);
+    } else if (std.mem.eql(u8, subcmd, "topology")) {
+        const filter = parseTopologyFilter(sub_args) catch return;
+        try topology_cmd.run(allocator, client, filter, opts.json_output, beam_id);
+    }
+}
+
 fn dispatch(
     allocator: std.mem.Allocator,
     subcmd: []const u8,
@@ -219,43 +234,15 @@ fn dispatch(
     opts: GlobalOpts,
 ) !void {
     if (std.mem.eql(u8, subcmd, "beams")) {
-        try beams_cmd.run(allocator, client, opts.json_output);
+        try beams_cmd.run(allocator, client, opts.json_output, true);
     } else if (std.mem.eql(u8, subcmd, "ps")) {
         // warden-di6
-        var filter = ps_cmd.Filter{};
-        var j: usize = 0;
-        while (j < sub_args.len) : (j += 1) {
-            const arg = sub_args[j];
-            if (std.mem.eql(u8, arg, "--beam")) {
-                j += 1;
-                if (j >= sub_args.len) return usageErr("--beam requires an id");
-                filter.beam = std.fmt.parseInt(u32, sub_args[j], 10) catch
-                    return usageErr("--beam must be a number");
-            } else if (std.mem.eql(u8, arg, "--kind")) {
-                j += 1;
-                if (j >= sub_args.len) return usageErr("--kind requires a value");
-                filter.kind = sub_args[j];
-            } else if (std.mem.eql(u8, arg, "--state")) {
-                j += 1;
-                if (j >= sub_args.len) return usageErr("--state requires a value");
-                filter.state = sub_args[j];
-            }
-        }
-        try ps_cmd.run(allocator, client, filter, opts.json_output);
+        const filter = try parsePsFilter(sub_args);
+        try ps_cmd.run(allocator, client, filter, opts.json_output, true);
     } else if (std.mem.eql(u8, subcmd, "topology")) {
         // warden-mf3
-        var filter = topology_cmd.Filter{};
-        var j: usize = 0;
-        while (j < sub_args.len) : (j += 1) {
-            const arg = sub_args[j];
-            if (std.mem.eql(u8, arg, "--beam")) {
-                j += 1;
-                if (j >= sub_args.len) return usageErr("--beam requires an id");
-                filter.beam = std.fmt.parseInt(u32, sub_args[j], 10) catch
-                    return usageErr("--beam must be a number");
-            }
-        }
-        try topology_cmd.run(allocator, client, filter, opts.json_output);
+        const filter = try parseTopologyFilter(sub_args);
+        try topology_cmd.run(allocator, client, filter, opts.json_output, null);
     } else if (std.mem.eql(u8, subcmd, "logs")) {
         // warden-9jm
         if (sub_args.len == 0) return usageErr("logs requires a pid argument (beam/proc)");
@@ -325,6 +312,45 @@ fn dispatch(
     } else {
         return usageErr("unknown subcommand");
     }
+}
+
+// warden-xh7
+fn parsePsFilter(sub_args: []const []const u8) !ps_cmd.Filter {
+    var filter = ps_cmd.Filter{};
+    var j: usize = 0;
+    while (j < sub_args.len) : (j += 1) {
+        const arg = sub_args[j];
+        if (std.mem.eql(u8, arg, "--beam")) {
+            j += 1;
+            if (j >= sub_args.len) return usageErr("--beam requires an id");
+            filter.beam = std.fmt.parseInt(u32, sub_args[j], 10) catch
+                return usageErr("--beam must be a number");
+        } else if (std.mem.eql(u8, arg, "--kind")) {
+            j += 1;
+            if (j >= sub_args.len) return usageErr("--kind requires a value");
+            filter.kind = sub_args[j];
+        } else if (std.mem.eql(u8, arg, "--state")) {
+            j += 1;
+            if (j >= sub_args.len) return usageErr("--state requires a value");
+            filter.state = sub_args[j];
+        }
+    }
+    return filter;
+}
+
+fn parseTopologyFilter(sub_args: []const []const u8) !topology_cmd.Filter {
+    var filter = topology_cmd.Filter{};
+    var j: usize = 0;
+    while (j < sub_args.len) : (j += 1) {
+        const arg = sub_args[j];
+        if (std.mem.eql(u8, arg, "--beam")) {
+            j += 1;
+            if (j >= sub_args.len) return usageErr("--beam requires an id");
+            filter.beam = std.fmt.parseInt(u32, sub_args[j], 10) catch
+                return usageErr("--beam must be a number");
+        }
+    }
+    return filter;
 }
 
 fn parseDuration(s: []const u8) !u64 {
