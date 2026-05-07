@@ -6,6 +6,8 @@ pub const registry = @import("registry.zig");
 pub const mailbox = @import("mailbox.zig");
 // warden-h12
 pub const storage = @import("storage.zig");
+// warden-7a1
+pub const scheduler = @import("scheduler.zig");
 
 comptime {
     _ = @import("types_test.zig");
@@ -14,4 +16,6 @@ comptime {
     _ = @import("mailbox_test.zig");
     // warden-h12
     _ = @import("storage_test.zig");
+    // warden-7a1
+    _ = @import("scheduler_test.zig");
 }
