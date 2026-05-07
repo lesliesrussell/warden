@@ -26,6 +26,8 @@ pub const topology_research_agent = @import("topology_research_agent.zig");
 pub const topology_etl = @import("topology_etl.zig");
 // warden-45x
 pub const topology_failure_demo = @import("topology_failure_demo.zig");
+// warden-5l5
+pub const topology_watchdog_demo = @import("topology_watchdog_demo.zig");
 
 comptime {
     _ = @import("types_test.zig");
@@ -52,4 +54,6 @@ comptime {
     _ = @import("topology_reference_test.zig");
     // warden-45x
     _ = @import("failure_recovery_test.zig");
+    // warden-5l5
+    _ = @import("watchdog_intervention_test.zig");
 }
