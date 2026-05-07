@@ -213,6 +213,10 @@ pub const LogRecord = struct {
 /// Per-process append-only NDJSON log writer.
 /// Each process gets its own file named `<beam>-<pid>.log`.
 /// Uses Zig 0.15 std.fs.File.Writer with an embedded buffer.
+///
+/// IMPORTANT: `ProcessLogger` must not be moved after `init` returns — the
+/// internal write buffer is referenced by address. Always store behind a
+/// pointer or in a stable location (e.g. heap-allocated).
 pub const ProcessLogger = struct {
     allocator: std.mem.Allocator,
     beam_id: u32,
@@ -223,6 +227,8 @@ pub const ProcessLogger = struct {
     seq: u64,
 
     // warden-554
+    /// Initialise in-place.  Caller must ensure the returned value is never
+    /// copied or moved (the writer holds a pointer into `self.buf`).
     pub fn init(
         allocator: std.mem.Allocator,
         beam_id: u32,
@@ -241,8 +247,9 @@ pub const ProcessLogger = struct {
         // Seek to end for append behaviour
         try file.seekFromEnd(0);
 
-        // We initialise buf and file_writer as undefined then fix them up.
-        // The file_writer.interface.buffer pointer will be patched in fixup.
+        // RLS (result location semantics) places `self` directly at the
+        // caller's destination, so `&self.buf` is stable by the time the
+        // caller receives it.
         var self: ProcessLogger = .{
             .allocator = allocator,
             .beam_id = beam_id,
@@ -270,8 +277,9 @@ pub const ProcessLogger = struct {
 
     // warden-554
     /// Write one NDJSON record for `event`.
-    /// `extra` is an optional map of additional string→string fields to append.
-    pub fn emit(self: *ProcessLogger, event: LogEvent, extra: ?std.StringHashMap([]const u8)) !void {
+    /// `extra` is an optional `std.json.ObjectMap` of additional fields to
+    /// append; values are serialised according to their `std.json.Value` type.
+    pub fn emit(self: *ProcessLogger, event: LogEvent, extra: ?std.json.ObjectMap) !void {
         self.seq += 1;
         const ts = std.time.milliTimestamp();
         const w = &self.file_writer.interface;
@@ -285,14 +293,14 @@ pub const ProcessLogger = struct {
         // Event-specific fields
         try writeEventFields(w, event);
 
-        // Caller-supplied extra string fields
+        // Caller-supplied extra fields (typed JSON values)
         if (extra) |map| {
             var it = map.iterator();
             while (it.next()) |entry| {
                 try w.writeByte(',');
                 try writeJsonString(w, entry.key_ptr.*);
                 try w.writeByte(':');
-                try writeJsonString(w, entry.value_ptr.*);
+                try writeJsonValue(w, entry.value_ptr.*);
             }
         }
 
@@ -305,7 +313,7 @@ pub const ProcessLogger = struct {
         self: *ProcessLogger,
         level: []const u8,
         message: []const u8,
-        extra: ?std.StringHashMap([]const u8),
+        extra: ?std.json.ObjectMap,
     ) !void {
         try self.emit(.{ .note = .{ .level = level, .message = message } }, extra);
     }
@@ -316,7 +324,7 @@ pub const ProcessLogger = struct {
         self: *ProcessLogger,
         name: []const u8,
         value: f64,
-        extra: ?std.StringHashMap([]const u8),
+        extra: ?std.json.ObjectMap,
     ) !void {
         try self.emit(.{ .metric = .{ .name = name, .value = value } }, extra);
     }
@@ -326,7 +334,7 @@ pub const ProcessLogger = struct {
     pub fn warn(
         self: *ProcessLogger,
         message: []const u8,
-        extra: ?std.StringHashMap([]const u8),
+        extra: ?std.json.ObjectMap,
     ) !void {
         try self.emit(.{ .warning = .{ .message = message } }, extra);
     }
@@ -336,11 +344,45 @@ pub const ProcessLogger = struct {
     pub fn err(
         self: *ProcessLogger,
         message: []const u8,
-        extra: ?std.StringHashMap([]const u8),
+        extra: ?std.json.ObjectMap,
     ) !void {
         try self.emit(.{ .error_event = .{ .message = message } }, extra);
     }
 };
+
+// warden-554
+/// Serialise a `std.json.Value` to the writer.
+fn writeJsonValue(w: anytype, val: std.json.Value) !void {
+    switch (val) {
+        .null => try w.writeAll("null"),
+        .bool => |b| try w.writeAll(if (b) "true" else "false"),
+        .integer => |i| try w.print("{d}", .{i}),
+        .float => |f| try w.print("{d}", .{f}),
+        .number_string => |s| try w.writeAll(s),
+        .string => |s| try writeJsonString(w, s),
+        .array => |arr| {
+            try w.writeByte('[');
+            for (arr.items, 0..) |item, i| {
+                if (i > 0) try w.writeByte(',');
+                try writeJsonValue(w, item);
+            }
+            try w.writeByte(']');
+        },
+        .object => |obj| {
+            try w.writeByte('{');
+            var it = obj.iterator();
+            var first = true;
+            while (it.next()) |entry| {
+                if (!first) try w.writeByte(',');
+                first = false;
+                try writeJsonString(w, entry.key_ptr.*);
+                try w.writeByte(':');
+                try writeJsonValue(w, entry.value_ptr.*);
+            }
+            try w.writeByte('}');
+        },
+    }
+}
 
 // warden-554
 /// Write a JSON-escaped string including surrounding quotes.
