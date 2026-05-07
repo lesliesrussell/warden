@@ -186,10 +186,11 @@ pub const Ctx = struct {
         try std.fs.cwd().makePath(log_dir);
         const dir = try std.fs.cwd().openDir(log_dir, .{});
 
-        // ProcessLogger must not be moved after init; heap-allocate it.
+        // ProcessLogger must not be moved after init (file_writer holds &self.buf).
+        // Use initInPlace so the struct is initialised directly in heap memory.
         const pl = try runtime.allocator.create(ProcessLogger);
         errdefer runtime.allocator.destroy(pl);
-        pl.* = try ProcessLogger.init(runtime.allocator, runtime.beam_id, pid.proc, dir);
+        try pl.initInPlace(runtime.allocator, runtime.beam_id, pid.proc, dir);
         errdefer pl.deinit();
 
         const sv = try StorageView.init(

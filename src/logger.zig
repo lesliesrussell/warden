@@ -229,6 +229,38 @@ pub const ProcessLogger = struct {
     // warden-554
     /// Initialise in-place.  Caller must ensure the returned value is never
     /// copied or moved (the writer holds a pointer into `self.buf`).
+    /// Initialise a heap-allocated ProcessLogger in-place.
+    /// Call on an already-allocated *ProcessLogger — never on a local var,
+    /// because file_writer holds &self.buf which must not move after init.
+    pub fn initInPlace(
+        self: *ProcessLogger,
+        allocator: std.mem.Allocator,
+        beam_id: u32,
+        pid: u64,
+        log_dir: std.fs.Dir,
+    ) !void {
+        const filename = try std.fmt.allocPrint(allocator, "{d}-{d}.log", .{ beam_id, pid });
+        defer allocator.free(filename);
+
+        const file = try log_dir.createFile(filename, .{
+            .truncate = false,
+            .exclusive = false,
+        });
+        errdefer file.close();
+
+        try file.seekFromEnd(0);
+
+        self.allocator = allocator;
+        self.beam_id = beam_id;
+        self.pid = pid;
+        self.file = file;
+        self.buf = undefined;
+        self.seq = 0;
+        // file_writer stores &self.buf — must be set after self is stable.
+        self.file_writer = std.fs.File.Writer.initStreaming(file, &self.buf);
+    }
+
+    // Keep the old init for callers that rely on RLS (single-assignment, no errdefer).
     pub fn init(
         allocator: std.mem.Allocator,
         beam_id: u32,
@@ -244,12 +276,10 @@ pub const ProcessLogger = struct {
         });
         errdefer file.close();
 
-        // Seek to end for append behaviour
         try file.seekFromEnd(0);
 
-        // RLS (result location semantics) places `self` directly at the
-        // caller's destination, so `&self.buf` is stable by the time the
-        // caller receives it.
+        // RLS places `self` at the caller's result location, so &self.buf is
+        // stable. Safe ONLY when the caller does `var x: ProcessLogger = try init(...)`.
         var self: ProcessLogger = .{
             .allocator = allocator,
             .beam_id = beam_id,
