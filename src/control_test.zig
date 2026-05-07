@@ -201,3 +201,100 @@ test "control server: topology.get returns tree with parent-child relationships"
         try std.testing.expectEqualStrings("native_worker", child.object.get("kind").?.string);
     }
 }
+
+// warden-9jm
+test "control server: logs.stream reads log file by pid" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(log_path);
+
+    // Write a synthetic log file for beam=33, proc=7.
+    {
+        const lf = try tmp.dir.createFile("33-7.log", .{});
+        defer lf.close();
+        try lf.writeAll("{\"ts\":1000.0,\"beam\":33,\"pid\":7,\"seq\":1,\"event\":\"note\",\"msg\":\"hello\"}\n");
+        try lf.writeAll("{\"ts\":1001.0,\"beam\":33,\"pid\":7,\"seq\":2,\"event\":\"note\",\"msg\":\"world\"}\n");
+        try lf.writeAll("{\"ts\":1002.0,\"beam\":33,\"pid\":7,\"seq\":3,\"event\":\"metric\",\"name\":\"latency_ms\",\"value\":3}\n");
+    }
+
+    const rt = try beam.Runtime.init(allocator, 33);
+    defer rt.destroy();
+
+    const socket_path = "/tmp/warden_ctrl_test7.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.setLogDir(log_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = "{\"req_id\":\"lg1\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"33/7\"}}";
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expect(obj.get("ok").?.bool);
+
+    const lines = obj.get("payload").?.object.get("lines").?.array;
+    try std.testing.expectEqual(@as(usize, 3), lines.items.len);
+
+    // First line should contain "hello".
+    try std.testing.expect(std.mem.indexOf(u8, lines.items[0].string, "hello") != null);
+}
+
+test "control server: logs.stream grep filter" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(log_path);
+
+    {
+        const lf = try tmp.dir.createFile("34-8.log", .{});
+        defer lf.close();
+        try lf.writeAll("{\"ts\":1000.0,\"event\":\"note\",\"msg\":\"tool_call started\"}\n");
+        try lf.writeAll("{\"ts\":1001.0,\"event\":\"note\",\"msg\":\"unrelated log\"}\n");
+        try lf.writeAll("{\"ts\":1002.0,\"event\":\"note\",\"msg\":\"tool_call finished\"}\n");
+    }
+
+    const rt = try beam.Runtime.init(allocator, 34);
+    defer rt.destroy();
+
+    const socket_path = "/tmp/warden_ctrl_test8.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.setLogDir(log_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = "{\"req_id\":\"lg2\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"34/8\",\"grep\":\"tool_call\"}}";
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+
+    const lines = parsed.value.object.get("payload").?.object.get("lines").?.array;
+    // Only the 2 lines containing "tool_call".
+    try std.testing.expectEqual(@as(usize, 2), lines.items.len);
+}

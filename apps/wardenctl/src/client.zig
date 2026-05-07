@@ -62,6 +62,13 @@ pub const ControlClient = struct {
     // warden-di6
     /// Send a request with an explicit JSON payload string. Caller owns the returned slice.
     pub fn requestWithPayload(self: *ControlClient, action: []const u8, payload_json: []const u8) ![]u8 {
+        try self.sendRequest(action, payload_json);
+        return self.recvFrame();
+    }
+
+    // warden-9jm
+    /// Send a request frame without reading the response (for streaming responses).
+    pub fn sendRequest(self: *ControlClient, action: []const u8, payload_json: []const u8) !void {
         self.req_counter += 1;
         const req_json = try std.fmt.allocPrint(
             self.allocator,
@@ -70,6 +77,10 @@ pub const ControlClient = struct {
         );
         defer self.allocator.free(req_json);
         try writeFrame(self.stream, req_json);
+    }
+
+    /// Read one response frame. Caller owns the returned slice.
+    pub fn recvFrame(self: *ControlClient) ![]u8 {
         return readFrame(self.allocator, self.stream);
     }
 };

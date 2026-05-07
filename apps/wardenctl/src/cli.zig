@@ -7,6 +7,8 @@ const beams_cmd = @import("commands/beams.zig");
 const ps_cmd = @import("commands/ps.zig");
 // warden-mf3
 const topology_cmd = @import("commands/topology.zig");
+// warden-9jm
+const logs_cmd = @import("commands/logs.zig");
 
 // warden-39v
 pub const GlobalOpts = struct {
@@ -102,9 +104,42 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
         try topology_cmd.run(allocator, &client, filter, opts.json_output);
+    } else if (std.mem.eql(u8, subcmd, "logs")) {
+        // warden-9jm
+        if (sub_args.len == 0) return usageErr("logs requires a pid argument (beam/proc)");
+        var log_opts = logs_cmd.Options{ .pid = sub_args[0] };
+        var j: usize = 1;
+        while (j < sub_args.len) : (j += 1) {
+            const arg = sub_args[j];
+            if (std.mem.eql(u8, arg, "--follow") or std.mem.eql(u8, arg, "-f")) {
+                log_opts.follow = true;
+            } else if (std.mem.eql(u8, arg, "--grep")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--grep requires a pattern");
+                log_opts.grep = sub_args[j];
+            } else if (std.mem.eql(u8, arg, "--since")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--since requires a duration");
+                log_opts.since_ms = parseDuration(sub_args[j]) catch
+                    return usageErr("--since: invalid duration (use 10s, 5m, 1h)");
+            }
+        }
+        try logs_cmd.run(allocator, &client, log_opts, opts.json_output);
     } else {
         return usageErr("unknown subcommand");
     }
+}
+
+fn parseDuration(s: []const u8) !u64 {
+    if (s.len == 0) return error.InvalidDuration;
+    const unit = s[s.len - 1];
+    const num = try std.fmt.parseInt(u64, s[0 .. s.len - 1], 10);
+    return switch (unit) {
+        's' => num * 1000,
+        'm' => num * 60 * 1000,
+        'h' => num * 3600 * 1000,
+        else => error.InvalidDuration,
+    };
 }
 
 fn resolveHome(buf: []u8, path: []const u8) []const u8 {
@@ -131,6 +166,7 @@ fn printUsage() void {
         \\  beams       List active beams
         \\  ps          List processes (--beam, --kind, --state)
         \\  topology    Show supervisor tree (--beam)
+        \\  logs <pid>  Stream process logs (--since, --grep, --follow)
         \\
         \\Global options:
         \\  --socket <path>   Control socket path (default: $WARDEN_CTRL_SOCKET or ~/.warden/ctrl.sock)

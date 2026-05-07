@@ -251,6 +251,9 @@ fn handleConnection(cs: *ControlServer, stream: std.net.Stream) !void {
     } else if (std.mem.eql(u8, action, "topology.get")) {
         // warden-mf3
         try handleTopologyGet(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "logs.stream")) {
+        // warden-9jm
+        try handleLogsStream(cs, allocator, req_id, stream, payload_val);
     } else {
         const err_resp = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown action: {s}\",\"payload\":null}}",
@@ -270,11 +273,210 @@ fn serverThread(cs: *ControlServer) void {
     }
 }
 
+// warden-9jm
+fn writeJsonEscapedString(w: anytype, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try w.print("\\u{x:0>4}", .{c}),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeByte('"');
+}
+
+fn extractTs(line: []const u8) f64 {
+    const key = "\"ts\":";
+    const start = std.mem.indexOf(u8, line, key) orelse return 0;
+    const num_start = start + key.len;
+    var end = num_start;
+    while (end < line.len and line[end] != ',' and line[end] != '}') : (end += 1) {}
+    return std.fmt.parseFloat(f64, line[num_start..end]) catch 0;
+}
+
+fn handleLogsStream(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    const log_dir = cs.log_dir orelse {
+        const err = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"log_dir not configured\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(err);
+        return writeFrame(stream, err);
+    };
+
+    // Extract payload fields.
+    var pid_str: []const u8 = "";
+    var since_ms: u64 = 0;
+    var grep_pattern: ?[]const u8 = null;
+    var follow = false;
+
+    if (payload_val) |pv| {
+        switch (pv) {
+            .object => |p| {
+                if (p.get("pid")) |pv2| pid_str = switch (pv2) {
+                    .string => |s| s,
+                    else => "",
+                };
+                if (p.get("since_ms")) |sv| since_ms = switch (sv) {
+                    .integer => |i| @intCast(i),
+                    else => 0,
+                };
+                if (p.get("grep")) |gv| grep_pattern = switch (gv) {
+                    .string => |s| s,
+                    else => null,
+                };
+                if (p.get("follow")) |fv| follow = switch (fv) {
+                    .bool => |b| b,
+                    else => false,
+                };
+            },
+            else => {},
+        }
+    }
+
+    // Parse PID: "beam/proc".
+    const slash = std.mem.indexOfScalar(u8, pid_str, '/') orelse {
+        const err = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid format, expected beam/proc\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(err);
+        return writeFrame(stream, err);
+    };
+    const beam_id = std.fmt.parseInt(u32, pid_str[0..slash], 10) catch {
+        const err = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(err);
+        return writeFrame(stream, err);
+    };
+    const proc_id = std.fmt.parseInt(u64, pid_str[slash + 1 ..], 10) catch {
+        const err = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(err);
+        return writeFrame(stream, err);
+    };
+
+    const log_path = try std.fmt.allocPrint(allocator, "{s}/{d}-{d}.log", .{ log_dir, beam_id, proc_id });
+    defer allocator.free(log_path);
+
+    const file = std.fs.openFileAbsolute(log_path, .{}) catch {
+        const err = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"log file not found\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(err);
+        return writeFrame(stream, err);
+    };
+    defer file.close();
+
+    const cutoff_ts: f64 = if (since_ms > 0)
+        @as(f64, @floatFromInt(std.time.milliTimestamp() - @as(i64, @intCast(since_ms)))) / 1000.0
+    else
+        0.0;
+
+    if (!follow) {
+        // Read entire file, filter, return as JSON array.
+        const content = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+        defer allocator.free(content);
+
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        const w = buf.writer(allocator);
+
+        try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"lines\":[", .{req_id});
+
+        var count: usize = 0;
+        var lines = std.mem.splitScalar(u8, content, '\n');
+        while (lines.next()) |line| {
+            const trimmed = std.mem.trimRight(u8, line, "\r");
+            if (trimmed.len == 0) continue;
+            if (cutoff_ts > 0 and extractTs(trimmed) < cutoff_ts) continue;
+            if (grep_pattern) |pat| {
+                if (std.mem.indexOf(u8, trimmed, pat) == null) continue;
+            }
+            if (count > 0) try w.writeByte(',');
+            try writeJsonEscapedString(w, trimmed);
+            count += 1;
+        }
+
+        try w.print("],\"count\":{d}}}}}", .{count});
+        return writeFrame(stream, buf.items);
+    }
+
+    // Follow mode: send streaming header, then tail the file.
+    const header = try std.fmt.allocPrint(allocator,
+        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"streaming\":true}}}}",
+        .{req_id});
+    defer allocator.free(header);
+    try writeFrame(stream, header);
+
+    // Send existing content first.
+    const content = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+    defer allocator.free(content);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (trimmed.len == 0) continue;
+        if (cutoff_ts > 0 and extractTs(trimmed) < cutoff_ts) continue;
+        if (grep_pattern) |pat| {
+            if (std.mem.indexOf(u8, trimmed, pat) == null) continue;
+        }
+        var line_buf: std.ArrayList(u8) = .empty;
+        defer line_buf.deinit(allocator);
+        const lw = line_buf.writer(allocator);
+        try lw.writeAll("{\"kind\":\"line\",\"data\":");
+        try writeJsonEscapedString(lw, trimmed);
+        try lw.writeByte('}');
+        writeFrame(stream, line_buf.items) catch return;
+    }
+
+    // Poll for new content.
+    var pos = try file.getPos();
+    while (!cs.stopping.load(.acquire)) {
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+        const new_content = blk: {
+            try file.seekTo(pos);
+            break :blk file.readToEndAlloc(allocator, 1 * 1024 * 1024) catch break;
+        };
+        defer allocator.free(new_content);
+        if (new_content.len == 0) continue;
+        pos += new_content.len;
+
+        var new_lines = std.mem.splitScalar(u8, new_content, '\n');
+        while (new_lines.next()) |line| {
+            const trimmed = std.mem.trimRight(u8, line, "\r");
+            if (trimmed.len == 0) continue;
+            if (grep_pattern) |pat| {
+                if (std.mem.indexOf(u8, trimmed, pat) == null) continue;
+            }
+            var line_buf: std.ArrayList(u8) = .empty;
+            defer line_buf.deinit(allocator);
+            const lw = line_buf.writer(allocator);
+            try lw.writeAll("{\"kind\":\"line\",\"data\":");
+            try writeJsonEscapedString(lw, trimmed);
+            try lw.writeByte('}');
+            writeFrame(stream, line_buf.items) catch return;
+        }
+    }
+}
+
 // warden-39v
 pub const ControlServer = struct {
     allocator: std.mem.Allocator,
     runtime: *Runtime,
     socket_path: []u8,
+    log_dir: ?[]u8,
     server: std.net.Server,
     thread: ?std.Thread,
     stopping: std.atomic.Value(bool),
@@ -292,11 +494,19 @@ pub const ControlServer = struct {
             .allocator = allocator,
             .runtime = runtime,
             .socket_path = owned_path,
+            .log_dir = null,
             .server = server,
             .thread = null,
             .stopping = std.atomic.Value(bool).init(false),
             .started_at = std.time.milliTimestamp(),
         };
+    }
+
+    // warden-9jm
+    /// Configure the log directory so logs.stream can locate per-process log files.
+    pub fn setLogDir(self: *ControlServer, log_dir: []const u8) !void {
+        if (self.log_dir) |old| self.allocator.free(old);
+        self.log_dir = try self.allocator.dupe(u8, log_dir);
     }
 
     /// Spawn the server thread. Must be called after init().
@@ -313,5 +523,6 @@ pub const ControlServer = struct {
         self.thread = null;
         std.fs.deleteFileAbsolute(self.socket_path) catch {};
         self.allocator.free(self.socket_path);
+        if (self.log_dir) |d| self.allocator.free(d);
     }
 };
