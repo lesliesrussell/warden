@@ -3,6 +3,7 @@
 const std = @import("std");
 const beam = @import("beam.zig");
 const control = @import("control.zig");
+const types = @import("types.zig");
 
 test "control server: beam.list returns beam_id and process_count" {
     const allocator = std.testing.allocator;
@@ -297,4 +298,75 @@ test "control server: logs.stream grep filter" {
     const lines = parsed.value.object.get("payload").?.object.get("lines").?.array;
     // Only the 2 lines containing "tool_call".
     try std.testing.expectEqual(@as(usize, 2), lines.items.len);
+}
+
+// warden-aai
+test "control server: proc.control pause and resume" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 77);
+    defer rt.destroy();
+
+    const pid = try rt.registry.spawn(.native_worker, null, .{});
+    // Spawn starts in .starting; transition to .ready so pause is a valid transition.
+    try rt.registry.transition(pid, .ready);
+
+    const socket_path = "/tmp/warden_ctrl_test9.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    // Pause — new connection per request (server handles one frame per connection).
+    {
+        const stream = try std.net.connectUnixSocket(socket_path);
+        defer stream.close();
+
+        const pause_req = try std.fmt.allocPrint(
+            allocator,
+            "{{\"req_id\":\"pc1\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"77/{d}\",\"op\":\"pause\"}}}}",
+            .{pid.proc},
+        );
+        defer allocator.free(pause_req);
+        try control.writeFrame(stream, pause_req);
+
+        const pause_resp = try control.readFrame(allocator, stream);
+        defer allocator.free(pause_resp);
+
+        const p_parsed = try std.json.parseFromSlice(std.json.Value, allocator, pause_resp, .{});
+        defer p_parsed.deinit();
+        try std.testing.expectEqual(true, p_parsed.value.object.get("ok").?.bool);
+    }
+
+    rt.registry.mutex.lock();
+    const after_pause = rt.registry.map.get(pid.proc).?.state;
+    rt.registry.mutex.unlock();
+    try std.testing.expectEqual(types.ProcessState.paused, after_pause);
+
+    // Resume — new connection.
+    {
+        const stream = try std.net.connectUnixSocket(socket_path);
+        defer stream.close();
+
+        const resume_req = try std.fmt.allocPrint(
+            allocator,
+            "{{\"req_id\":\"pc2\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"77/{d}\",\"op\":\"resume\"}}}}",
+            .{pid.proc},
+        );
+        defer allocator.free(resume_req);
+        try control.writeFrame(stream, resume_req);
+
+        const resume_resp = try control.readFrame(allocator, stream);
+        defer allocator.free(resume_resp);
+
+        const r_parsed = try std.json.parseFromSlice(std.json.Value, allocator, resume_resp, .{});
+        defer r_parsed.deinit();
+        try std.testing.expectEqual(true, r_parsed.value.object.get("ok").?.bool);
+    }
+
+    rt.registry.mutex.lock();
+    const after_resume = rt.registry.map.get(pid.proc).?.state;
+    rt.registry.mutex.unlock();
+    try std.testing.expectEqual(types.ProcessState.ready, after_resume);
 }

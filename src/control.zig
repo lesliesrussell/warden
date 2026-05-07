@@ -9,6 +9,7 @@
 const std = @import("std");
 const beam_mod = @import("beam.zig");
 const registry_mod = @import("registry.zig");
+const types = @import("types.zig");
 
 const Runtime = beam_mod.Runtime;
 const ProcessEntry = registry_mod.ProcessEntry;
@@ -254,6 +255,9 @@ fn handleConnection(cs: *ControlServer, stream: std.net.Stream) !void {
     } else if (std.mem.eql(u8, action, "logs.stream")) {
         // warden-9jm
         try handleLogsStream(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "proc.control")) {
+        // warden-aai
+        try handleProcControl(cs, allocator, req_id, stream, payload_val);
     } else {
         const err_resp = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown action: {s}\",\"payload\":null}}",
@@ -297,6 +301,103 @@ fn extractTs(line: []const u8) f64 {
     var end = num_start;
     while (end < line.len and line[end] != ',' and line[end] != '}') : (end += 1) {}
     return std.fmt.parseFloat(f64, line[num_start..end]) catch 0;
+}
+
+// warden-aai
+fn handleProcControl(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    const payload = payload_val orelse {
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"missing payload\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(resp);
+        return writeFrame(stream, resp);
+    };
+
+    const pid_str = switch (payload.object.get("pid") orelse .null) {
+        .string => |s| s,
+        else => {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"missing pid\",\"payload\":null}}",
+                .{req_id});
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        },
+    };
+
+    const op_str = switch (payload.object.get("op") orelse .null) {
+        .string => |s| s,
+        else => {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"missing op\",\"payload\":null}}",
+                .{req_id});
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        },
+    };
+
+    const slash = std.mem.indexOf(u8, pid_str, "/") orelse {
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid format, expected beam/proc\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(resp);
+        return writeFrame(stream, resp);
+    };
+
+    const beam_id = std.fmt.parseInt(u32, pid_str[0..slash], 10) catch {
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid beam id\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(resp);
+        return writeFrame(stream, resp);
+    };
+    const proc_id = std.fmt.parseInt(u64, pid_str[slash + 1 ..], 10) catch {
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid proc id\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(resp);
+        return writeFrame(stream, resp);
+    };
+
+    const target_state: types.ProcessState = if (std.mem.eql(u8, op_str, "pause"))
+        .paused
+    else if (std.mem.eql(u8, op_str, "resume"))
+        .ready
+    else {
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown op: {s}\",\"payload\":null}}",
+            .{ req_id, op_str });
+        defer allocator.free(resp);
+        return writeFrame(stream, resp);
+    };
+
+    const pid = types.Pid{ .beam = beam_id, .proc = proc_id };
+
+    const transition_err = cs.runtime.registry.transition(pid, target_state);
+
+    if (transition_err) |_| {
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"{s}\"}}}}",
+            .{ req_id, pid_str, op_str });
+        defer allocator.free(resp);
+        try writeFrame(stream, resp);
+    } else |err| {
+        const msg = switch (err) {
+            error.ProcessNotFound => "process not found",
+            error.InvalidTransition => "invalid state transition",
+            else => "internal error",
+        };
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
+            .{ req_id, msg });
+        defer allocator.free(resp);
+        try writeFrame(stream, resp);
+    }
 }
 
 fn handleLogsStream(

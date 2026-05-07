@@ -9,6 +9,8 @@ const ps_cmd = @import("commands/ps.zig");
 const topology_cmd = @import("commands/topology.zig");
 // warden-9jm
 const logs_cmd = @import("commands/logs.zig");
+// warden-aai
+const control_cmd = @import("commands/control.zig");
 
 // warden-39v
 pub const GlobalOpts = struct {
@@ -125,6 +127,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
         try logs_cmd.run(allocator, &client, log_opts, opts.json_output);
+    } else if (std.mem.eql(u8, subcmd, "pause") or std.mem.eql(u8, subcmd, "resume")) {
+        // warden-aai
+        if (sub_args.len == 0) return usageErr("pause/resume requires a pid argument (beam/proc)");
+        try control_cmd.run(allocator, &client, sub_args[0], subcmd, opts.json_output);
     } else {
         return usageErr("unknown subcommand");
     }
@@ -163,10 +169,12 @@ fn printUsage() void {
         \\Usage: wardenctl [--socket <path>] [--json] <command>
         \\
         \\Commands:
-        \\  beams       List active beams
-        \\  ps          List processes (--beam, --kind, --state)
-        \\  topology    Show supervisor tree (--beam)
-        \\  logs <pid>  Stream process logs (--since, --grep, --follow)
+        \\  beams          List active beams
+        \\  ps             List processes (--beam, --kind, --state)
+        \\  topology       Show supervisor tree (--beam)
+        \\  logs <pid>     Stream process logs (--since, --grep, --follow)
+        \\  pause <pid>    Pause a process
+        \\  resume <pid>   Resume a paused process
         \\
         \\Global options:
         \\  --socket <path>   Control socket path (default: $WARDEN_CTRL_SOCKET or ~/.warden/ctrl.sock)
