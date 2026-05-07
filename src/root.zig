@@ -20,6 +20,10 @@ pub const beam = @import("beam.zig");
 pub const bridge = @import("bridge.zig");
 // warden-1ud
 pub const topology = @import("topology.zig");
+// warden-7hi
+pub const topology_code_assistant = @import("topology_code_assistant.zig");
+pub const topology_research_agent = @import("topology_research_agent.zig");
+pub const topology_etl = @import("topology_etl.zig");
 
 comptime {
     _ = @import("types_test.zig");
@@ -42,4 +46,6 @@ comptime {
     _ = @import("bridge_test.zig");
     // warden-1ud
     _ = @import("topology_test.zig");
+    // warden-7hi
+    _ = @import("topology_reference_test.zig");
 }
