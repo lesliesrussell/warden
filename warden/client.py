@@ -11,9 +11,16 @@ class BeamCtx:
     """Low-level connection to the Warden runtime over a Unix socket."""
 
     def __init__(self, sock_path: str | None = None):
-        path = sock_path or os.environ["WARDEN_SOCKET"]
+        path = sock_path or os.environ.get("WARDEN_SOCKET", "/tmp/warden.sock")
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(path)
+        # warden-499
+        try:
+            self.sock.connect(path)
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"No Warden runtime listening at {path!r}. "
+                "Start the runtime first, or set WARDEN_SOCKET to the correct socket path."
+            ) from None
         hs = self._recv_frame()
         self.pid = hs["pid"]
 
