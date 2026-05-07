@@ -140,7 +140,80 @@ fn handleProcList(
         );
     }
 
-    try w.writeAll("]}}}}");
+    try w.writeAll("]}}");
+    try writeFrame(stream, buf.items);
+}
+
+// warden-mf3
+fn writeTreeNode(entries: []const ProcessEntry, node: ProcessEntry, w: anytype) !void {
+    try w.print(
+        "{{\"beam\":{d},\"pid\":{d},\"kind\":\"{s}\",\"state\":\"{s}\",\"children\":[",
+        .{ node.pid.beam, node.pid.proc, @tagName(node.kind), @tagName(node.state) },
+    );
+    var first = true;
+    for (entries) |e| {
+        const sv = e.supervisor orelse continue;
+        if (sv.beam == node.pid.beam and sv.proc == node.pid.proc) {
+            if (!first) try w.writeByte(',');
+            try writeTreeNode(entries, e, w);
+            first = false;
+        }
+    }
+    try w.writeAll("]}");
+}
+
+// warden-mf3
+fn handleTopologyGet(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    var filter_beam: ?u32 = null;
+    if (payload_val) |pv| {
+        switch (pv) {
+            .object => |p| {
+                if (p.get("beam")) |bv| {
+                    filter_beam = switch (bv) {
+                        .integer => |i| @intCast(i),
+                        else => null,
+                    };
+                }
+            },
+            else => {},
+        }
+    }
+
+    var entries: std.ArrayList(ProcessEntry) = .empty;
+    defer entries.deinit(allocator);
+
+    cs.runtime.registry.mutex.lock();
+    var it = cs.runtime.registry.map.iterator();
+    while (it.next()) |kv| {
+        const e = kv.value_ptr.*;
+        if (filter_beam) |fb| {
+            if (e.pid.beam != fb) continue;
+        }
+        try entries.append(allocator, e);
+    }
+    cs.runtime.registry.mutex.unlock();
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"roots\":[", .{req_id});
+
+    var first = true;
+    for (entries.items) |e| {
+        if (e.supervisor != null) continue; // only roots
+        if (!first) try w.writeByte(',');
+        try writeTreeNode(entries.items, e, w);
+        first = false;
+    }
+
+    try w.writeAll("]}}");
     try writeFrame(stream, buf.items);
 }
 
@@ -175,6 +248,9 @@ fn handleConnection(cs: *ControlServer, stream: std.net.Stream) !void {
     } else if (std.mem.eql(u8, action, "proc.list")) {
         // warden-di6
         try handleProcList(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "topology.get")) {
+        // warden-mf3
+        try handleTopologyGet(cs, allocator, req_id, stream, payload_val);
     } else {
         const err_resp = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown action: {s}\",\"payload\":null}}",

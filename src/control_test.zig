@@ -150,3 +150,54 @@ test "control server: proc.list with kind filter" {
         try std.testing.expectEqualStrings("native_worker", pv.object.get("kind").?.string);
     }
 }
+
+// warden-mf3
+test "control server: topology.get returns tree with parent-child relationships" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 55);
+    defer rt.destroy();
+
+    // supervisor → two workers
+    const sup_pid = try rt.registry.spawn(.native_supervisor, null, .{});
+    const w1_pid = try rt.registry.spawn(.native_worker, sup_pid, .{});
+    const w2_pid = try rt.registry.spawn(.native_worker, sup_pid, .{});
+    _ = w1_pid;
+    _ = w2_pid;
+
+    const socket_path = "/tmp/warden_ctrl_test5.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = "{\"req_id\":\"topo1\",\"action\":\"topology.get\",\"payload\":{}}";
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expect(obj.get("ok").?.bool);
+
+    const roots = obj.get("payload").?.object.get("roots").?.array;
+    // One root: the supervisor.
+    try std.testing.expectEqual(@as(usize, 1), roots.items.len);
+
+    const root = roots.items[0].object;
+    try std.testing.expectEqualStrings("native_supervisor", root.get("kind").?.string);
+
+    // Two children.
+    const children = root.get("children").?.array;
+    try std.testing.expectEqual(@as(usize, 2), children.items.len);
+    for (children.items) |child| {
+        try std.testing.expectEqualStrings("native_worker", child.object.get("kind").?.string);
+    }
+}

@@ -5,6 +5,8 @@ const ControlClient = @import("client.zig").ControlClient;
 const beams_cmd = @import("commands/beams.zig");
 // warden-di6
 const ps_cmd = @import("commands/ps.zig");
+// warden-mf3
+const topology_cmd = @import("commands/topology.zig");
 
 // warden-39v
 pub const GlobalOpts = struct {
@@ -86,6 +88,20 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
         try ps_cmd.run(allocator, &client, filter, opts.json_output);
+    } else if (std.mem.eql(u8, subcmd, "topology")) {
+        // warden-mf3
+        var filter = topology_cmd.Filter{};
+        var j: usize = 0;
+        while (j < sub_args.len) : (j += 1) {
+            const arg = sub_args[j];
+            if (std.mem.eql(u8, arg, "--beam")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--beam requires an id");
+                filter.beam = std.fmt.parseInt(u32, sub_args[j], 10) catch
+                    return usageErr("--beam must be a number");
+            }
+        }
+        try topology_cmd.run(allocator, &client, filter, opts.json_output);
     } else {
         return usageErr("unknown subcommand");
     }
@@ -114,6 +130,7 @@ fn printUsage() void {
         \\Commands:
         \\  beams       List active beams
         \\  ps          List processes (--beam, --kind, --state)
+        \\  topology    Show supervisor tree (--beam)
         \\
         \\Global options:
         \\  --socket <path>   Control socket path (default: $WARDEN_CTRL_SOCKET or ~/.warden/ctrl.sock)
