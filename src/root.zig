@@ -60,4 +60,6 @@ comptime {
     _ = @import("watchdog_intervention_test.zig");
     // warden-39v
     _ = @import("control_test.zig");
+    // warden-3cn
+    _ = @import("live_demo_test.zig");
 }

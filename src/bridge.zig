@@ -69,6 +69,54 @@ fn sendError(stream: std.net.Stream, allocator: std.mem.Allocator, message: []co
     try writeFrame(stream, json);
 }
 
+// warden-3cn: serialize a std.json.Value to an anytype writer (std.json.stringify unavailable in 0.15)
+fn writeJsonValue(w: anytype, val: std.json.Value) !void {
+    switch (val) {
+        .null => try w.writeAll("null"),
+        .bool => |b| try w.writeAll(if (b) "true" else "false"),
+        .integer => |i| try w.print("{d}", .{i}),
+        .float => |f| try w.print("{d}", .{f}),
+        .number_string => |s| try w.writeAll(s),
+        .string => |s| {
+            try w.writeByte('"');
+            for (s) |c| {
+                switch (c) {
+                    '"' => try w.writeAll("\\\""),
+                    '\\' => try w.writeAll("\\\\"),
+                    '\n' => try w.writeAll("\\n"),
+                    '\r' => try w.writeAll("\\r"),
+                    '\t' => try w.writeAll("\\t"),
+                    else => try w.writeByte(c),
+                }
+            }
+            try w.writeByte('"');
+        },
+        .array => |arr| {
+            try w.writeByte('[');
+            for (arr.items, 0..) |item, i| {
+                if (i > 0) try w.writeByte(',');
+                try writeJsonValue(w, item);
+            }
+            try w.writeByte(']');
+        },
+        .object => |obj| {
+            try w.writeByte('{');
+            var it = obj.iterator();
+            var first = true;
+            while (it.next()) |entry| {
+                if (!first) try w.writeByte(',');
+                first = false;
+                try w.writeByte('"');
+                try w.writeAll(entry.key_ptr.*);
+                try w.writeByte('"');
+                try w.writeByte(':');
+                try writeJsonValue(w, entry.value_ptr.*);
+            }
+            try w.writeByte('}');
+        },
+    }
+}
+
 // warden-eet
 /// Reader thread context — passed to the spawned thread.
 const ReaderCtx = struct {
@@ -84,8 +132,7 @@ fn readerThread(rc: ReaderCtx) void {
     while (self.running.load(.acquire)) {
         const conn = self.conn orelse break;
 
-        const frame = readFrame(allocator, conn) catch |err| {
-            _ = err;
+        const frame = readFrame(allocator, conn) catch {
             // EOF or connection closed — exit loop.
             break;
         };
@@ -112,8 +159,7 @@ fn readerThread(rc: ReaderCtx) void {
             else => continue,
         };
 
-        self.handleFrame(kind_str, obj) catch |err| {
-            _ = err;
+        self.handleFrame(kind_str, obj) catch {
             // Log failure best-effort; continue.
         };
     }
@@ -133,6 +179,8 @@ pub const ForeignBridge = struct {
     running: std.atomic.Value(bool),
     ctx: Ctx,
     write_mutex: std.Thread.Mutex,
+    // warden-3cn: arena for reply message strings; freed on deinit
+    msg_arena: std.heap.ArenaAllocator,
 
     // warden-eet
     /// Initialise a ForeignBridge.  Does NOT spawn the child process yet.
@@ -143,10 +191,22 @@ pub const ForeignBridge = struct {
         log_dir: []const u8,
         storage_base: []const u8,
     ) !ForeignBridge {
+        return initWithParent(allocator, runtime, cmd, log_dir, storage_base, null);
+    }
+
+    // warden-3cn
+    pub fn initWithParent(
+        allocator: std.mem.Allocator,
+        runtime: *Runtime,
+        cmd: []const []const u8,
+        log_dir: []const u8,
+        storage_base: []const u8,
+        parent_pid: ?Pid,
+    ) !ForeignBridge {
         _ = cmd; // stored in start() via child_proc field — kept here for API symmetry
 
         // Allocate a PID for the foreign worker.
-        const pid = try runtime.registry.spawn(.foreign_worker, null, .{});
+        const pid = try runtime.registry.spawn(.foreign_worker, parent_pid, .{});
         try runtime.allocMailbox(pid, .{});
 
         // Build socket path.
@@ -178,6 +238,7 @@ pub const ForeignBridge = struct {
             .running = std.atomic.Value(bool).init(false),
             .ctx = ctx,
             .write_mutex = .{},
+            .msg_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
 
@@ -196,6 +257,8 @@ pub const ForeignBridge = struct {
         self.allocator.free(self.socket_path);
         // Deinit ctx.
         self.ctx.deinit();
+        // warden-3cn: free all reply message strings allocated in the arena
+        self.msg_arena.deinit();
     }
 
     // warden-eet
@@ -210,6 +273,7 @@ pub const ForeignBridge = struct {
         // Spawn child.
         var child = std.process.Child.init(cmd, self.allocator);
         child.env_map = &env_map;
+        child.stderr_behavior = .Ignore; // suppress worker exit tracebacks
         try child.spawn();
         self.child_proc = child;
 
@@ -226,6 +290,10 @@ pub const ForeignBridge = struct {
         defer self.allocator.free(handshake);
         try writeFrame(connection.stream, handshake);
 
+        // warden-3cn: transition to running so the process can be paused/resumed
+        try self.runtime.registry.transition(self.pid, .ready);
+        try self.runtime.registry.transition(self.pid, .running);
+
         // Start reader thread.
         self.running.store(true, .release);
         const rc = ReaderCtx{ .bridge = self };
@@ -237,10 +305,15 @@ pub const ForeignBridge = struct {
     pub fn deliver(self: *ForeignBridge, msg: MessageEnvelope) !void {
         const conn = self.conn orelse return error.NotConnected;
 
+        // warden-3cn: serialize body to JSON
+        var body_buf: std.ArrayList(u8) = .empty;
+        defer body_buf.deinit(self.allocator);
+        try writeJsonValue(body_buf.writer(self.allocator), msg.body);
+
         const json = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"kind\":\"msg\",\"type\":\"{s}\",\"id\":\"{s}\",\"from\":\"{s}\",\"to\":\"{s}\",\"body\":null}}",
-            .{ msg.@"type", msg.id, msg.from, msg.to },
+            "{{\"kind\":\"msg\",\"type\":\"{s}\",\"id\":\"{s}\",\"from\":\"{s}\",\"to\":\"{s}\",\"body\":{s}}}",
+            .{ msg.@"type", msg.id, msg.from, msg.to, body_buf.items },
         );
         defer self.allocator.free(json);
 
@@ -368,27 +441,21 @@ pub const ForeignBridge = struct {
             return;
         };
 
-        const from_str = try std.fmt.allocPrint(
-            self.allocator,
-            "{d}/{d}",
-            .{ self.pid.beam, self.pid.proc },
-        );
-        defer self.allocator.free(from_str);
+        // warden-3cn: all reply message strings are allocated in msg_arena, freed on bridge.deinit()
+        const ma = self.msg_arena.allocator();
+        const from_str = try std.fmt.allocPrint(ma, "{d}/{d}", .{ self.pid.beam, self.pid.proc });
+        const reply_to_dup = try ma.dupe(u8, reply_to_str);
+        const type_dup = try ma.dupe(u8, msg_type);
+        const id_dup = try ma.dupe(u8, msg_id);
+        const from_dup = try ma.dupe(u8, from_str);
+        const corr_dup: ?[]const u8 = if (corr) |c| try ma.dupe(u8, c) else null;
 
-        const reply_to_dup = try self.allocator.dupe(u8, reply_to_str);
-        defer self.allocator.free(reply_to_dup);
-
-        const type_dup = try self.allocator.dupe(u8, msg_type);
-        defer self.allocator.free(type_dup);
-
-        const id_dup = try self.allocator.dupe(u8, msg_id);
-        defer self.allocator.free(id_dup);
-
-        const from_dup = try self.allocator.dupe(u8, from_str);
-        defer self.allocator.free(from_dup);
-
-        const corr_dup: ?[]const u8 = if (corr) |c| try self.allocator.dupe(u8, c) else null;
-        defer if (corr_dup) |c| self.allocator.free(c);
+        // Serialize body to a string, then re-parse into the arena
+        const body_raw = obj.get("body") orelse std.json.Value.null;
+        var body_buf: std.ArrayList(u8) = .empty;
+        defer body_buf.deinit(self.allocator);
+        try writeJsonValue(body_buf.writer(self.allocator), body_raw);
+        const body_parsed = try std.json.parseFromSlice(std.json.Value, ma, body_buf.items, .{});
 
         const msg = MessageEnvelope{
             .kind = .response,
@@ -397,7 +464,7 @@ pub const ForeignBridge = struct {
             .from = from_dup,
             .to = reply_to_dup,
             .corr = corr_dup,
-            .body = .null,
+            .body = body_parsed.value,
         };
 
         try self.ctx.send(reply_to_pid, msg);
@@ -556,10 +623,22 @@ pub const BridgeSupervisor = struct {
         log_dir: []const u8,
         storage_base: []const u8,
     ) !Pid {
+        return self.spawnWorkerUnder(cmd, log_dir, storage_base, null);
+    }
+
+    // warden-3cn
+    /// Spawn a new foreign worker as a child of parent_pid, return its PID.
+    pub fn spawnWorkerUnder(
+        self: *BridgeSupervisor,
+        cmd: []const []const u8,
+        log_dir: []const u8,
+        storage_base: []const u8,
+        parent_pid: ?Pid,
+    ) !Pid {
         const bridge = try self.allocator.create(ForeignBridge);
         errdefer self.allocator.destroy(bridge);
 
-        bridge.* = try ForeignBridge.init(self.allocator, self.runtime, cmd, log_dir, storage_base);
+        bridge.* = try ForeignBridge.initWithParent(self.allocator, self.runtime, cmd, log_dir, storage_base, parent_pid);
         errdefer bridge.deinit();
 
         try bridge.start(cmd);
