@@ -118,6 +118,8 @@ fn watchdogThread(wdctx: *WatchdogCtx) void {
 
     while (!wdctx.stopping.load(.acquire)) {
         std.Thread.sleep(poll_ns);
+        // warden-iry: recheck after sleep — deinit() may have fired during sleep
+        if (wdctx.stopping.load(.acquire)) break;
 
         const worker_pid = demo.current_worker_proc.load(.acquire);
         if (worker_pid == 0) continue;
