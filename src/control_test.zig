@@ -492,3 +492,39 @@ test "control server: proc.control promote sets activity_class and ttl" {
     try std.testing.expectEqual(types.ActivityClass.elevated, class);
     try std.testing.expectEqual(@as(?u64, 30000), ttl);
 }
+
+// warden-4ga
+test "control server: sidecar written on start, removed on stop" {
+    const allocator = std.testing.allocator;
+
+    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+
+    const rt = try beam.Runtime.init(allocator, 91);
+    defer rt.destroy();
+
+    const socket_path = "/tmp/warden_ctrl_test13.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+
+    // Sidecar should exist at ~/.warden/sockets/91.json
+    const sidecar_path = try std.fmt.allocPrint(allocator, "{s}/.warden/sockets/91.json", .{home});
+    defer allocator.free(sidecar_path);
+
+    const sidecar_file = try std.fs.openFileAbsolute(sidecar_path, .{});
+    defer sidecar_file.close();
+    const content = try sidecar_file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings(socket_path, obj.get("socket_path").?.string);
+    try std.testing.expectEqual(@as(i64, 91), obj.get("beam_id").?.integer);
+
+    cs.stop();
+
+    // Sidecar should be removed after stop.
+    const missing = std.fs.accessAbsolute(sidecar_path, .{});
+    try std.testing.expectError(error.FileNotFound, missing);
+}

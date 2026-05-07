@@ -645,6 +645,8 @@ pub const ControlServer = struct {
     runtime: *Runtime,
     socket_path: []u8,
     log_dir: ?[]u8,
+    // warden-4ga
+    sidecar_path: ?[]u8,
     server: std.net.Server,
     thread: ?std.Thread,
     stopping: std.atomic.Value(bool),
@@ -663,6 +665,7 @@ pub const ControlServer = struct {
             .runtime = runtime,
             .socket_path = owned_path,
             .log_dir = null,
+            .sidecar_path = null,
             .server = server,
             .thread = null,
             .stopping = std.atomic.Value(bool).init(false),
@@ -677,9 +680,11 @@ pub const ControlServer = struct {
         self.log_dir = try self.allocator.dupe(u8, log_dir);
     }
 
-    /// Spawn the server thread. Must be called after init().
+    /// Spawn the server thread and register a discovery sidecar. Must be called after init().
     pub fn start(self: *ControlServer) !void {
         self.thread = try std.Thread.spawn(.{}, serverThread, .{self});
+        // warden-4ga: write sidecar so wardenctl can discover this runtime
+        self.writeSidecar() catch {};
     }
 
     /// Signal the server to stop, close the listen socket, and join the thread.
@@ -692,5 +697,37 @@ pub const ControlServer = struct {
         std.fs.deleteFileAbsolute(self.socket_path) catch {};
         self.allocator.free(self.socket_path);
         if (self.log_dir) |d| self.allocator.free(d);
+        // warden-4ga: remove sidecar on shutdown
+        if (self.sidecar_path) |p| {
+            std.fs.deleteFileAbsolute(p) catch {};
+            self.allocator.free(p);
+            self.sidecar_path = null;
+        }
+    }
+
+    // warden-4ga
+    fn writeSidecar(self: *ControlServer) !void {
+        const home = std.posix.getenv("HOME") orelse return error.NoHome;
+        const dir_path = try std.fmt.allocPrint(self.allocator, "{s}/.warden/sockets", .{home});
+        defer self.allocator.free(dir_path);
+
+        // Ensure ~/.warden and ~/.warden/sockets exist.
+        const warden_dir = try std.fmt.allocPrint(self.allocator, "{s}/.warden", .{home});
+        defer self.allocator.free(warden_dir);
+        std.fs.makeDirAbsolute(warden_dir) catch |e| if (e != error.PathAlreadyExists) return e;
+        std.fs.makeDirAbsolute(dir_path) catch |e| if (e != error.PathAlreadyExists) return e;
+
+        const sidecar = try std.fmt.allocPrint(
+            self.allocator, "{s}/{d}.json", .{ dir_path, self.runtime.beam_id });
+        self.sidecar_path = sidecar;
+
+        const json = try std.fmt.allocPrint(self.allocator,
+            "{{\"socket_path\":\"{s}\",\"beam_id\":{d}}}\n",
+            .{ self.socket_path, self.runtime.beam_id });
+        defer self.allocator.free(json);
+
+        const f = try std.fs.createFileAbsolute(sidecar, .{});
+        defer f.close();
+        try f.writeAll(json);
     }
 };

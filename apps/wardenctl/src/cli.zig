@@ -15,16 +15,84 @@ const control_cmd = @import("commands/control.zig");
 // warden-39v
 pub const GlobalOpts = struct {
     socket_path: []const u8,
+    // warden-4ga: true when set via --socket or $WARDEN_CTRL_SOCKET
+    socket_explicit: bool,
     json_output: bool,
     quiet: bool,
 };
 
 const default_socket = "~/.warden/ctrl.sock";
 
+// warden-4ga
+const SocketEntry = struct {
+    socket_path: []u8, // heap-owned
+    beam_id: u32,
+};
+
+// warden-4ga
+// Scan ~/.warden/sockets/*.json and return all valid, reachable socket entries.
+fn discoverSockets(allocator: std.mem.Allocator) ![]SocketEntry {
+    const home = std.posix.getenv("HOME") orelse return &.{};
+    const dir_path = try std.fmt.allocPrint(allocator, "{s}/.warden/sockets", .{home});
+    defer allocator.free(dir_path);
+
+    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return &.{};
+    defer dir.close();
+
+    var entries: std.ArrayList(SocketEntry) = .empty;
+    errdefer {
+        for (entries.items) |e| allocator.free(e.socket_path);
+        entries.deinit(allocator);
+    }
+
+    var it = dir.iterate();
+    while (try it.next()) |de| {
+        if (!std.mem.endsWith(u8, de.name, ".json")) continue;
+
+        const content = dir.readFileAlloc(allocator, de.name, 4096) catch continue;
+        defer allocator.free(content);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch continue;
+        defer parsed.deinit();
+
+        const obj = parsed.value.object;
+        const sp = switch (obj.get("socket_path") orelse continue) {
+            .string => |s| s,
+            else => continue,
+        };
+        const bid: u32 = switch (obj.get("beam_id") orelse continue) {
+            .integer => |n| @intCast(n),
+            else => continue,
+        };
+
+        // Verify the socket is actually reachable; skip stale sidecars.
+        const test_stream = std.net.connectUnixSocket(sp) catch continue;
+        test_stream.close();
+
+        const owned_sp = try allocator.dupe(u8, sp);
+        try entries.append(allocator, .{ .socket_path = owned_sp, .beam_id = bid });
+    }
+
+    return entries.toOwnedSlice(allocator);
+}
+
+fn freeSocketEntries(allocator: std.mem.Allocator, entries: []SocketEntry) void {
+    for (entries) |e| allocator.free(e.socket_path);
+    allocator.free(entries);
+}
+
+// warden-4ga: parse beam_id from "beam/proc" pid string
+fn beamIdFromPid(pid: []const u8) ?u32 {
+    const slash = std.mem.indexOf(u8, pid, "/") orelse return null;
+    return std.fmt.parseInt(u32, pid[0..slash], 10) catch null;
+}
+
 // warden-39v
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const env_socket = std.posix.getenv("WARDEN_CTRL_SOCKET");
     var opts = GlobalOpts{
-        .socket_path = std.posix.getenv("WARDEN_CTRL_SOCKET") orelse default_socket,
+        .socket_path = env_socket orelse default_socket,
+        .socket_explicit = env_socket != null,
         .json_output = false,
         .quiet = false,
     };
@@ -37,6 +105,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
             if (i >= args.len) return usageErr("--socket requires a path argument");
             opts.socket_path = args[i];
+            opts.socket_explicit = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             opts.json_output = true;
         } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
@@ -58,18 +127,99 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     i += 1;
     const sub_args = args[i..];
 
-    // Expand ~/ in socket path.
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const socket_path = resolveHome(&resolved_buf, opts.socket_path);
+    if (opts.socket_explicit) {
+        // warden-39v: single explicit socket — existing behavior
+        var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const socket_path = resolveHome(&resolved_buf, opts.socket_path);
 
-    var client = ControlClient.connect(allocator, socket_path) catch |err| {
-        if (err == error.RuntimeNotListening) std.process.exit(1);
-        return err;
-    };
-    defer client.close();
+        var client = ControlClient.connect(allocator, socket_path) catch |err| {
+            if (err == error.RuntimeNotListening) std.process.exit(1);
+            return err;
+        };
+        defer client.close();
 
+        try dispatch(allocator, subcmd, sub_args, &client, opts);
+    } else {
+        // warden-4ga: auto-discover all live runtimes
+        const sockets = try discoverSockets(allocator);
+        defer freeSocketEntries(allocator, sockets);
+
+        if (sockets.len == 0) {
+            const stderr = std.fs.File.stderr();
+            try stderr.writeAll("wardenctl: no Warden runtimes found\n");
+            try stderr.writeAll("  Start a runtime, or use --socket to specify a path.\n");
+            std.process.exit(1);
+        }
+
+        // Fan-out commands: query all sockets, print each (with header if >1).
+        const is_fanout = std.mem.eql(u8, subcmd, "beams") or
+            std.mem.eql(u8, subcmd, "ps") or
+            std.mem.eql(u8, subcmd, "topology");
+
+        if (is_fanout) {
+            const stdout = std.fs.File.stdout();
+            for (sockets) |entry| {
+                var client = ControlClient.connect(allocator, entry.socket_path) catch continue;
+                defer client.close();
+
+                if (sockets.len > 1 and !opts.json_output) {
+                    const hdr = try std.fmt.allocPrint(
+                        allocator, "── beam {d}  ({s})\n", .{ entry.beam_id, entry.socket_path });
+                    defer allocator.free(hdr);
+                    try stdout.writeAll(hdr);
+                }
+
+                try dispatch(allocator, subcmd, sub_args, &client, opts);
+            }
+            return;
+        }
+
+        // Targeted command: route by beam_id encoded in the pid argument.
+        const pid_arg = if (sub_args.len > 0) sub_args[0] else null;
+        const target_beam = if (pid_arg) |p| beamIdFromPid(p) else null;
+
+        if (sockets.len == 1) {
+            var client = ControlClient.connect(allocator, sockets[0].socket_path) catch |err| {
+                if (err == error.RuntimeNotListening) std.process.exit(1);
+                return err;
+            };
+            defer client.close();
+            try dispatch(allocator, subcmd, sub_args, &client, opts);
+        } else if (target_beam) |beam_id| {
+            // Find the socket for this beam.
+            const entry = for (sockets) |e| {
+                if (e.beam_id == beam_id) break e;
+            } else {
+                const stderr = std.fs.File.stderr();
+                const msg = try std.fmt.allocPrint(
+                    allocator, "wardenctl: no runtime found for beam {d}\n", .{beam_id});
+                defer allocator.free(msg);
+                try stderr.writeAll(msg);
+                std.process.exit(1);
+            };
+            var client = ControlClient.connect(allocator, entry.socket_path) catch |err| {
+                if (err == error.RuntimeNotListening) std.process.exit(1);
+                return err;
+            };
+            defer client.close();
+            try dispatch(allocator, subcmd, sub_args, &client, opts);
+        } else {
+            const stderr = std.fs.File.stderr();
+            try stderr.writeAll("wardenctl: multiple runtimes running — use --socket or include beam id in pid (beam/proc)\n");
+            std.process.exit(1);
+        }
+    }
+}
+
+fn dispatch(
+    allocator: std.mem.Allocator,
+    subcmd: []const u8,
+    sub_args: []const []const u8,
+    client: *ControlClient,
+    opts: GlobalOpts,
+) !void {
     if (std.mem.eql(u8, subcmd, "beams")) {
-        try beams_cmd.run(allocator, &client, opts.json_output);
+        try beams_cmd.run(allocator, client, opts.json_output);
     } else if (std.mem.eql(u8, subcmd, "ps")) {
         // warden-di6
         var filter = ps_cmd.Filter{};
@@ -91,7 +241,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 filter.state = sub_args[j];
             }
         }
-        try ps_cmd.run(allocator, &client, filter, opts.json_output);
+        try ps_cmd.run(allocator, client, filter, opts.json_output);
     } else if (std.mem.eql(u8, subcmd, "topology")) {
         // warden-mf3
         var filter = topology_cmd.Filter{};
@@ -105,7 +255,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     return usageErr("--beam must be a number");
             }
         }
-        try topology_cmd.run(allocator, &client, filter, opts.json_output);
+        try topology_cmd.run(allocator, client, filter, opts.json_output);
     } else if (std.mem.eql(u8, subcmd, "logs")) {
         // warden-9jm
         if (sub_args.len == 0) return usageErr("logs requires a pid argument (beam/proc)");
@@ -126,11 +276,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                     return usageErr("--since: invalid duration (use 10s, 5m, 1h)");
             }
         }
-        try logs_cmd.run(allocator, &client, log_opts, opts.json_output);
+        try logs_cmd.run(allocator, client, log_opts, opts.json_output);
     } else if (std.mem.eql(u8, subcmd, "pause") or std.mem.eql(u8, subcmd, "resume")) {
         // warden-aai
         if (sub_args.len == 0) return usageErr("pause/resume requires a pid argument (beam/proc)");
-        try control_cmd.run(allocator, &client, sub_args[0], subcmd, opts.json_output);
+        try control_cmd.run(allocator, client, sub_args[0], subcmd, opts.json_output);
     } else if (std.mem.eql(u8, subcmd, "kill") or std.mem.eql(u8, subcmd, "quarantine")) {
         // warden-h0j
         if (sub_args.len == 0) return usageErr("kill/quarantine requires a pid argument (beam/proc)");
@@ -148,7 +298,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             }
         }
         if (!force) return usageErr("kill/quarantine require --force to confirm");
-        try control_cmd.runWithReason(allocator, &client, subcmd, sub_args[0], reason, opts.json_output);
+        try control_cmd.runWithReason(allocator, client, subcmd, sub_args[0], reason, opts.json_output);
     } else if (std.mem.eql(u8, subcmd, "promote")) {
         // warden-h0j
         if (sub_args.len == 0) return usageErr("promote requires a pid argument (beam/proc)");
@@ -171,7 +321,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 promote_opts.reason = sub_args[j];
             }
         }
-        try control_cmd.runPromote(allocator, &client, sub_args[0], promote_opts, opts.json_output);
+        try control_cmd.runPromote(allocator, client, sub_args[0], promote_opts, opts.json_output);
     } else {
         return usageErr("unknown subcommand");
     }
@@ -210,7 +360,7 @@ fn printUsage() void {
         \\Usage: wardenctl [--socket <path>] [--json] <command>
         \\
         \\Commands:
-        \\  beams          List active beams
+        \\  beams          List active beams (all runtimes when no --socket)
         \\  ps             List processes (--beam, --kind, --state)
         \\  topology       Show supervisor tree (--beam)
         \\  logs <pid>     Stream process logs (--since, --grep, --follow)
@@ -221,7 +371,7 @@ fn printUsage() void {
         \\  promote <pid>        Promote process activity class (--class, --ttl, --reason)
         \\
         \\Global options:
-        \\  --socket <path>   Control socket path (default: $WARDEN_CTRL_SOCKET or ~/.warden/ctrl.sock)
+        \\  --socket <path>   Control socket path (default: auto-discover from ~/.warden/sockets/)
         \\  --json            Machine-readable JSON output
         \\  -q, --quiet       Suppress non-essential output
         \\
