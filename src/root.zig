@@ -10,6 +10,8 @@ pub const storage = @import("storage.zig");
 pub const scheduler = @import("scheduler.zig");
 // warden-u8y
 pub const policy = @import("policy.zig");
+// warden-554
+pub const logger = @import("logger.zig");
 
 comptime {
     _ = @import("types_test.zig");
@@ -22,4 +24,6 @@ comptime {
     _ = @import("scheduler_test.zig");
     // warden-u8y
     _ = @import("policy_test.zig");
+    // warden-554
+    _ = @import("logger_test.zig");
 }
