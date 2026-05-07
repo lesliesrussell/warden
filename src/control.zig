@@ -8,10 +8,12 @@
 
 const std = @import("std");
 const beam_mod = @import("beam.zig");
+const bridge_mod = @import("bridge.zig");
 const registry_mod = @import("registry.zig");
 const types = @import("types.zig");
 
 const Runtime = beam_mod.Runtime;
+const Pid = types.Pid;
 const ProcessEntry = registry_mod.ProcessEntry;
 
 // warden-39v
@@ -39,6 +41,249 @@ pub fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
 }
 
 // warden-39v
+// warden-7oi
+fn sendErrResp(allocator: std.mem.Allocator, req_id: []const u8, stream: std.net.Stream, msg: []const u8) !void {
+    const resp = try std.fmt.allocPrint(allocator,
+        "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
+        .{ req_id, msg });
+    defer allocator.free(resp);
+    try writeFrame(stream, resp);
+}
+
+// warden-7oi
+fn handleBeamCreate(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    var requested_id: ?u32 = null;
+    if (payload_val) |pv| {
+        if (pv == .object) {
+            if (pv.object.get("beam")) |bv| {
+                if (bv == .integer) requested_id = @intCast(bv.integer);
+            }
+        }
+    }
+
+    if (requested_id) |id| {
+        if (cs.runtimes.get(id) != null) {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"beam_id\":{d}}}}}",
+                .{ req_id, id });
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        }
+    }
+
+    const new_id = requested_id orelse cs.next_beam_id.fetchAdd(1, .monotonic);
+
+    const rt = try Runtime.init(cs.allocator, new_id);
+    errdefer rt.destroy();
+    try rt.start(2);
+
+    const sup = try cs.allocator.create(bridge_mod.BridgeSupervisor);
+    errdefer cs.allocator.destroy(sup);
+    sup.* = bridge_mod.BridgeSupervisor.init(cs.allocator, rt);
+
+    try cs.runtimes.put(new_id, rt);
+    try cs.supervisors.put(new_id, sup);
+
+    const resp = try std.fmt.allocPrint(allocator,
+        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"beam_id\":{d}}}}}",
+        .{ req_id, new_id });
+    defer allocator.free(resp);
+    try writeFrame(stream, resp);
+}
+
+// warden-7oi
+fn handleProcSpawn(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    const pv = payload_val orelse return sendErrResp(allocator, req_id, stream, "missing payload");
+    if (pv != .object) return sendErrResp(allocator, req_id, stream, "payload must be object");
+    const obj = pv.object;
+
+    const cmd_val = obj.get("cmd") orelse return sendErrResp(allocator, req_id, stream, "missing cmd");
+    if (cmd_val != .array) return sendErrResp(allocator, req_id, stream, "cmd must be array");
+
+    var cmd: std.ArrayList([]const u8) = .empty;
+    defer cmd.deinit(allocator);
+    for (cmd_val.array.items) |item| {
+        if (item != .string) return sendErrResp(allocator, req_id, stream, "cmd entries must be strings");
+        try cmd.append(allocator, item.string);
+    }
+
+    const beam_id: u32 = if (obj.get("beam")) |bv|
+        if (bv == .integer) @intCast(bv.integer) else cs.runtime.beam_id
+    else
+        cs.runtime.beam_id;
+
+    var parent_pid: ?Pid = null;
+    if (obj.get("parent")) |pv2| {
+        if (pv2 == .string) parent_pid = bridge_mod.parsePidStr(pv2.string) catch null;
+    }
+
+    const sup = cs.supervisors.get(beam_id) orelse
+        return sendErrResp(allocator, req_id, stream, "unknown beam");
+    const log_dir = cs.log_dir orelse "/tmp";
+    const store_base = cs.store_base orelse "/tmp";
+
+    const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid);
+
+    const pid_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ pid.beam, pid.proc });
+    defer allocator.free(pid_str);
+    const resp = try std.fmt.allocPrint(allocator,
+        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\"}}}}",
+        .{ req_id, pid_str });
+    defer allocator.free(resp);
+    try writeFrame(stream, resp);
+}
+
+// warden-7oi
+fn handleProcSend(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    const pv = payload_val orelse return sendErrResp(allocator, req_id, stream, "missing payload");
+    if (pv != .object) return sendErrResp(allocator, req_id, stream, "payload must be object");
+    const obj = pv.object;
+
+    const pid_val = obj.get("pid") orelse return sendErrResp(allocator, req_id, stream, "missing pid");
+    if (pid_val != .string) return sendErrResp(allocator, req_id, stream, "pid must be string");
+    const target = bridge_mod.parsePidStr(pid_val.string) catch
+        return sendErrResp(allocator, req_id, stream, "invalid pid");
+
+    const type_val = obj.get("type") orelse return sendErrResp(allocator, req_id, stream, "missing type");
+    if (type_val != .string) return sendErrResp(allocator, req_id, stream, "type must be string");
+
+    const body = obj.get("body") orelse std.json.Value.null;
+    const msg_id = try std.fmt.allocPrint(allocator, "ext-{x}", .{std.crypto.random.int(u32)});
+    defer allocator.free(msg_id);
+
+    const msg = types.MessageEnvelope{
+        .kind = .request,
+        .@"type" = type_val.string,
+        .id = msg_id,
+        .from = "external",
+        .to = pid_val.string,
+        .body = body,
+    };
+
+    if (cs.supervisors.get(target.beam)) |sup| {
+        if (sup.findBridge(target)) |b| {
+            try b.deliver(msg);
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":null}}",
+                .{req_id});
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        }
+    }
+    const rt = cs.runtimes.get(target.beam) orelse
+        return sendErrResp(allocator, req_id, stream, "unknown beam");
+    const mb = rt.getMailbox(target) orelse
+        return sendErrResp(allocator, req_id, stream, "no mailbox for pid");
+    _ = try mb.enqueue(msg);
+    const resp = try std.fmt.allocPrint(allocator,
+        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":null}}",
+        .{req_id});
+    defer allocator.free(resp);
+    try writeFrame(stream, resp);
+}
+
+// warden-7oi
+fn matchAny(_: types.MessageEnvelope) bool {
+    return true;
+}
+
+// warden-7oi
+fn handleProcCall(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    const pv = payload_val orelse return sendErrResp(allocator, req_id, stream, "missing payload");
+    if (pv != .object) return sendErrResp(allocator, req_id, stream, "payload must be object");
+    const obj = pv.object;
+
+    const pid_val = obj.get("pid") orelse return sendErrResp(allocator, req_id, stream, "missing pid");
+    if (pid_val != .string) return sendErrResp(allocator, req_id, stream, "pid must be string");
+    const target = bridge_mod.parsePidStr(pid_val.string) catch
+        return sendErrResp(allocator, req_id, stream, "invalid pid");
+
+    const type_val = obj.get("type") orelse return sendErrResp(allocator, req_id, stream, "missing type");
+    if (type_val != .string) return sendErrResp(allocator, req_id, stream, "type must be string");
+
+    const body = obj.get("body") orelse std.json.Value.null;
+    const timeout_ms: u64 = if (obj.get("timeout_ms")) |tv|
+        if (tv == .integer) @intCast(tv.integer) else 5000
+    else
+        5000;
+
+    const rt = cs.runtimes.get(target.beam) orelse
+        return sendErrResp(allocator, req_id, stream, "unknown beam");
+
+    const caller_pid = try rt.registry.spawn(.native_worker, null, .{});
+    try rt.allocMailbox(caller_pid, .{});
+
+    const caller_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ caller_pid.beam, caller_pid.proc });
+    defer allocator.free(caller_str);
+    const msg_id = try std.fmt.allocPrint(allocator, "ext-{x}", .{std.crypto.random.int(u32)});
+    defer allocator.free(msg_id);
+
+    const msg = types.MessageEnvelope{
+        .kind = .request,
+        .@"type" = type_val.string,
+        .id = msg_id,
+        .from = caller_str,
+        .to = pid_val.string,
+        .reply_to = caller_str,
+        .body = body,
+    };
+
+    if (cs.supervisors.get(target.beam)) |sup| {
+        if (sup.findBridge(target)) |b| {
+            try b.deliver(msg);
+        } else {
+            const mb_t = rt.getMailbox(target) orelse
+                return sendErrResp(allocator, req_id, stream, "no mailbox for pid");
+            _ = try mb_t.enqueue(msg);
+        }
+    } else {
+        return sendErrResp(allocator, req_id, stream, "unknown beam");
+    }
+
+    const max_attempts: u32 = @intCast(timeout_ms / 10 + 1);
+    var attempts: u32 = 0;
+    while (attempts < max_attempts) : (attempts += 1) {
+        const mb = rt.getMailbox(caller_pid) orelse break;
+        if (mb.receive(matchAny)) |reply| {
+            var body_buf: std.ArrayList(u8) = .empty;
+            defer body_buf.deinit(allocator);
+            try bridge_mod.writeJsonValue(body_buf.writer(allocator), reply.body);
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null," ++
+                "\"payload\":{{\"type\":\"{s}\",\"body\":{s}}}}}",
+                .{ req_id, reply.@"type", body_buf.items });
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        }
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    try sendErrResp(allocator, req_id, stream, "timeout");
+}
+
 fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []const u8, stream: std.net.Stream) !void {
     const uptime_ms = std.time.milliTimestamp() - cs.started_at;
 
@@ -244,7 +489,19 @@ fn handleConnection(cs: *ControlServer, stream: std.net.Stream) !void {
 
     const payload_val = obj.get("payload");
 
-    if (std.mem.eql(u8, action, "beam.list")) {
+    if (std.mem.eql(u8, action, "beam.create")) {
+        // warden-7oi
+        try handleBeamCreate(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "proc.spawn")) {
+        // warden-7oi
+        try handleProcSpawn(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "proc.send")) {
+        // warden-7oi
+        try handleProcSend(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "proc.call")) {
+        // warden-7oi
+        try handleProcCall(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "beam.list")) {
         try handleBeamList(cs, allocator, req_id, stream);
     } else if (std.mem.eql(u8, action, "proc.list")) {
         // warden-di6
@@ -651,6 +908,11 @@ pub const ControlServer = struct {
     thread: ?std.Thread,
     stopping: std.atomic.Value(bool),
     started_at: i64,
+    // warden-7oi: multi-beam management
+    runtimes: std.AutoHashMap(u32, *Runtime),
+    supervisors: std.AutoHashMap(u32, *bridge_mod.BridgeSupervisor),
+    next_beam_id: std.atomic.Value(u32),
+    store_base: ?[]u8,
 
     /// Bind the control socket and prepare to accept connections.
     /// Call start() to begin serving.
@@ -660,6 +922,22 @@ pub const ControlServer = struct {
         std.fs.deleteFileAbsolute(socket_path) catch {};
         const addr = try std.net.Address.initUnix(socket_path);
         const server = try addr.listen(.{});
+
+        // warden-7oi: seed the beam and supervisor maps with the primary runtime
+        var runtimes = std.AutoHashMap(u32, *Runtime).init(allocator);
+        errdefer runtimes.deinit();
+        try runtimes.put(runtime.beam_id, runtime);
+
+        const primary_sup = try allocator.create(bridge_mod.BridgeSupervisor);
+        primary_sup.* = bridge_mod.BridgeSupervisor.init(allocator, runtime);
+        var supervisors = std.AutoHashMap(u32, *bridge_mod.BridgeSupervisor).init(allocator);
+        errdefer {
+            primary_sup.deinit();
+            allocator.destroy(primary_sup);
+            supervisors.deinit();
+        }
+        try supervisors.put(runtime.beam_id, primary_sup);
+
         return .{
             .allocator = allocator,
             .runtime = runtime,
@@ -670,6 +948,10 @@ pub const ControlServer = struct {
             .thread = null,
             .stopping = std.atomic.Value(bool).init(false),
             .started_at = std.time.milliTimestamp(),
+            .runtimes = runtimes,
+            .supervisors = supervisors,
+            .next_beam_id = std.atomic.Value(u32).init(runtime.beam_id + 1),
+            .store_base = null,
         };
     }
 
@@ -703,6 +985,29 @@ pub const ControlServer = struct {
             self.allocator.free(p);
             self.sidecar_path = null;
         }
+        // warden-7oi: deinit all supervisors and non-primary runtimes
+        {
+            var it = self.supervisors.valueIterator();
+            while (it.next()) |sup_ptr| {
+                sup_ptr.*.deinit();
+                self.allocator.destroy(sup_ptr.*);
+            }
+            self.supervisors.deinit();
+        }
+        {
+            var it = self.runtimes.valueIterator();
+            while (it.next()) |rt_ptr| {
+                if (rt_ptr.* != self.runtime) rt_ptr.*.destroy();
+            }
+            self.runtimes.deinit();
+        }
+        if (self.store_base) |s| self.allocator.free(s);
+    }
+
+    // warden-7oi
+    pub fn setStoreBase(self: *ControlServer, store_base: []const u8) !void {
+        if (self.store_base) |old| self.allocator.free(old);
+        self.store_base = try self.allocator.dupe(u8, store_base);
     }
 
     // warden-4ga

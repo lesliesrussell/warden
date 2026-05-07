@@ -70,7 +70,7 @@ fn sendError(stream: std.net.Stream, allocator: std.mem.Allocator, message: []co
 }
 
 // warden-3cn: serialize a std.json.Value to an anytype writer (std.json.stringify unavailable in 0.15)
-fn writeJsonValue(w: anytype, val: std.json.Value) !void {
+pub fn writeJsonValue(w: anytype, val: std.json.Value) !void {
     switch (val) {
         .null => try w.writeAll("null"),
         .bool => |b| try w.writeAll(if (b) "true" else "false"),
@@ -573,7 +573,7 @@ pub const ForeignBridge = struct {
 
 // warden-eet
 /// Parse a "beam/proc" PID string.
-fn parsePidStr(s: []const u8) !Pid {
+pub fn parsePidStr(s: []const u8) !Pid {
     const slash = std.mem.indexOfScalar(u8, s, '/') orelse return error.InvalidPid;
     const beam = std.fmt.parseInt(u32, s[0..slash], 10) catch return error.InvalidPid;
     const proc = std.fmt.parseInt(u64, s[slash + 1 ..], 10) catch return error.InvalidPid;
@@ -624,6 +624,15 @@ pub const BridgeSupervisor = struct {
         storage_base: []const u8,
     ) !Pid {
         return self.spawnWorkerUnder(cmd, log_dir, storage_base, null);
+    }
+
+    // warden-7oi
+    /// Return the bridge managing pid, or null if none.
+    pub fn findBridge(self: *BridgeSupervisor, pid: Pid) ?*ForeignBridge {
+        for (self.bridges.items) |b| {
+            if (b.pid.beam == pid.beam and b.pid.proc == pid.proc) return b;
+        }
+        return null;
     }
 
     // warden-3cn

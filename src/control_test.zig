@@ -528,3 +528,102 @@ test "control server: sidecar written on start, removed on stop" {
     const missing = std.fs.accessAbsolute(sidecar_path, .{});
     try std.testing.expectError(error.FileNotFound, missing);
 }
+
+// warden-7oi
+test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 50);
+    defer rt.destroy();
+    try rt.start(2);
+
+    const socket_path = "/tmp/warden_mgmt_test_50.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    // ── beam.create: existing beam returns its id ────────────────────────────
+    {
+        const stream = try std.net.connectUnixSocket(socket_path);
+        defer stream.close();
+        try control.writeFrame(stream, "{\"req_id\":\"m1\",\"action\":\"beam.create\",\"payload\":{\"beam\":50}}");
+        const resp = try control.readFrame(allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("ok").?.bool);
+        try std.testing.expectEqual(@as(i64, 50), parsed.value.object.get("payload").?.object.get("beam_id").?.integer);
+    }
+
+    // ── beam.create: allocates a new beam ───────────────────────────────────
+    {
+        const stream = try std.net.connectUnixSocket(socket_path);
+        defer stream.close();
+        try control.writeFrame(stream, "{\"req_id\":\"m2\",\"action\":\"beam.create\",\"payload\":{\"beam\":51}}");
+        const resp = try control.readFrame(allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("ok").?.bool);
+        try std.testing.expectEqual(@as(i64, 51), parsed.value.object.get("payload").?.object.get("beam_id").?.integer);
+    }
+
+    // ── proc.spawn: spawns math_worker on beam 50, returns pid ──────────────
+    const math_script = "examples/live_demo/math_worker.py";
+    var spawned_pid_str: []u8 = undefined;
+    {
+        const stream = try std.net.connectUnixSocket(socket_path);
+        defer stream.close();
+        const req = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"m3\",\"action\":\"proc.spawn\"," ++
+            "\"payload\":{{\"beam\":50,\"cmd\":[\"python3\",\"{s}\"]}}}}",
+            .{math_script});
+        defer allocator.free(req);
+        try control.writeFrame(stream, req);
+        const resp = try control.readFrame(allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("ok").?.bool);
+        const pid_s = parsed.value.object.get("payload").?.object.get("pid").?.string;
+        spawned_pid_str = try allocator.dupe(u8, pid_s);
+    }
+    defer allocator.free(spawned_pid_str);
+
+    // ── proc.call: req.fib(10) → body 55 ────────────────────────────────────
+    {
+        const stream = try std.net.connectUnixSocket(socket_path);
+        defer stream.close();
+        const req = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"m4\",\"action\":\"proc.call\"," ++
+            "\"payload\":{{\"pid\":\"{s}\",\"type\":\"req.fib\",\"body\":10,\"timeout_ms\":3000}}}}",
+            .{spawned_pid_str});
+        defer allocator.free(req);
+        try control.writeFrame(stream, req);
+        const resp = try control.readFrame(allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("ok").?.bool);
+        const body = parsed.value.object.get("payload").?.object.get("body").?;
+        try std.testing.expectEqual(@as(i64, 55), body.integer);
+    }
+
+    // ── proc.send: fire and forget, returns ok ───────────────────────────────
+    {
+        const stream = try std.net.connectUnixSocket(socket_path);
+        defer stream.close();
+        const req = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"m5\",\"action\":\"proc.send\"," ++
+            "\"payload\":{{\"pid\":\"{s}\",\"type\":\"req.fib\",\"body\":5}}}}",
+            .{spawned_pid_str});
+        defer allocator.free(req);
+        try control.writeFrame(stream, req);
+        const resp = try control.readFrame(allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("ok").?.bool);
+    }
+}
