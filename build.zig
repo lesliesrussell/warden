@@ -89,6 +89,20 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    // warden-39v: wardenctl CLI — links only to its own client library, not core internals.
+    const wardenctl_exe = b.addExecutable(.{
+        .name = "wardenctl",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("apps/wardenctl/src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(wardenctl_exe);
+
+    const wardenctl_step = b.step("wardenctl", "Build wardenctl CLI");
+    wardenctl_step.dependOn(&wardenctl_exe.step);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
