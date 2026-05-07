@@ -16,6 +16,8 @@ pub const logger = @import("logger.zig");
 pub const supervisor = @import("supervisor.zig");
 // warden-7q1
 pub const beam = @import("beam.zig");
+// warden-eet
+pub const bridge = @import("bridge.zig");
 
 comptime {
     _ = @import("types_test.zig");
@@ -34,4 +36,6 @@ comptime {
     _ = @import("supervisor_test.zig");
     // warden-7q1
     _ = @import("beam_test.zig");
+    // warden-eet
+    _ = @import("bridge_test.zig");
 }

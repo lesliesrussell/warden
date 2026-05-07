@@ -1,0 +1,570 @@
+// warden-eet
+
+const std = @import("std");
+const beam_mod = @import("beam.zig");
+const types = @import("types.zig");
+
+const Runtime = beam_mod.Runtime;
+const Ctx = beam_mod.Ctx;
+const Pid = types.Pid;
+const MessageEnvelope = types.MessageEnvelope;
+const MessageKind = types.MessageKind;
+const MessagePriority = types.MessagePriority;
+const Namespace = beam_mod.Namespace;
+
+// warden-eet
+/// Write a length-prefixed JSON frame to a stream.
+/// Format: 4-byte big-endian u32 length + UTF-8 JSON payload.
+pub fn writeFrameTest(stream: std.net.Stream, json: []const u8) !void {
+    return writeFrame(stream, json);
+}
+
+/// Read a length-prefixed JSON frame from a stream (exported for tests).
+pub fn readFrameTest(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
+    return readFrame(allocator, stream);
+}
+
+fn writeFrame(stream: std.net.Stream, json: []const u8) !void {
+    var hdr: [4]u8 = undefined;
+    std.mem.writeInt(u32, &hdr, @intCast(json.len), .big);
+    try stream.writeAll(&hdr);
+    try stream.writeAll(json);
+}
+
+// warden-eet
+/// Read a length-prefixed JSON frame from a stream.
+/// Caller owns the returned slice.
+fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
+    var hdr: [4]u8 = undefined;
+    const n = try stream.readAtLeast(&hdr, 4);
+    if (n < 4) return error.ConnectionClosed;
+    const length = std.mem.readInt(u32, &hdr, .big);
+    if (length == 0) return error.EmptyFrame;
+    const buf = try allocator.alloc(u8, length);
+    errdefer allocator.free(buf);
+    const read = try stream.readAtLeast(buf, length);
+    if (read < length) return error.ConnectionClosed;
+    return buf;
+}
+
+// warden-eet
+/// Parse a Namespace from a string.
+fn parseNamespace(ns_str: []const u8) !Namespace {
+    if (std.mem.eql(u8, ns_str, "proc_temp")) return .proc_temp;
+    if (std.mem.eql(u8, ns_str, "proc_cache")) return .proc_cache;
+    return error.UnknownNamespace;
+}
+
+// warden-eet
+/// Send a simple {"kind":"ok"} response.
+fn sendOk(stream: std.net.Stream) !void {
+    try writeFrame(stream, "{\"kind\":\"ok\"}");
+}
+
+// warden-eet
+/// Send a {"kind":"error","message":"..."} response.
+fn sendError(stream: std.net.Stream, allocator: std.mem.Allocator, message: []const u8) !void {
+    const json = try std.fmt.allocPrint(allocator, "{{\"kind\":\"error\",\"message\":\"{s}\"}}", .{message});
+    defer allocator.free(json);
+    try writeFrame(stream, json);
+}
+
+// warden-eet
+/// Reader thread context — passed to the spawned thread.
+const ReaderCtx = struct {
+    bridge: *ForeignBridge,
+};
+
+// warden-eet
+/// Thread entry: read frames from the worker and dispatch by kind.
+fn readerThread(rc: ReaderCtx) void {
+    const self = rc.bridge;
+    const allocator = self.allocator;
+
+    while (self.running.load(.acquire)) {
+        const conn = self.conn orelse break;
+
+        const frame = readFrame(allocator, conn) catch |err| {
+            _ = err;
+            // EOF or connection closed — exit loop.
+            break;
+        };
+        defer allocator.free(frame);
+
+        // Parse JSON frame.
+        const parsed = std.json.parseFromSlice(
+            std.json.Value,
+            allocator,
+            frame,
+            .{},
+        ) catch continue;
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        const obj = switch (root) {
+            .object => |o| o,
+            else => continue,
+        };
+
+        const kind_val = obj.get("kind") orelse continue;
+        const kind_str = switch (kind_val) {
+            .string => |s| s,
+            else => continue,
+        };
+
+        self.handleFrame(kind_str, obj) catch |err| {
+            _ = err;
+            // Log failure best-effort; continue.
+        };
+    }
+}
+
+// warden-eet
+/// Unix socket bridge between the Warden runtime and a foreign (e.g. Python) worker.
+pub const ForeignBridge = struct {
+    allocator: std.mem.Allocator,
+    runtime: *Runtime,
+    pid: Pid,
+    socket_path: []const u8, // owned
+    server: std.net.Server,
+    child_proc: ?std.process.Child,
+    conn: ?std.net.Stream,
+    reader_thread: ?std.Thread,
+    running: std.atomic.Value(bool),
+    ctx: Ctx,
+    write_mutex: std.Thread.Mutex,
+
+    // warden-eet
+    /// Initialise a ForeignBridge.  Does NOT spawn the child process yet.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        runtime: *Runtime,
+        cmd: []const []const u8,
+        log_dir: []const u8,
+        storage_base: []const u8,
+    ) !ForeignBridge {
+        _ = cmd; // stored in start() via child_proc field — kept here for API symmetry
+
+        // Allocate a PID for the foreign worker.
+        const pid = try runtime.registry.spawn(.foreign_worker, null, .{});
+        try runtime.allocMailbox(pid, .{});
+
+        // Build socket path.
+        const socket_path = try std.fmt.allocPrint(
+            allocator,
+            "/tmp/warden-{d}.sock",
+            .{pid.proc},
+        );
+        errdefer allocator.free(socket_path);
+
+        // Bind Unix socket.
+        // Delete any stale socket file first.
+        std.fs.cwd().deleteFile(socket_path) catch {};
+        const addr = try std.net.Address.initUnix(socket_path);
+        const server = try addr.listen(.{});
+
+        // Build Ctx for the bridge to use when dispatching API calls.
+        const ctx = try Ctx.init(runtime, pid, log_dir, storage_base);
+
+        return ForeignBridge{
+            .allocator = allocator,
+            .runtime = runtime,
+            .pid = pid,
+            .socket_path = socket_path,
+            .server = server,
+            .child_proc = null,
+            .conn = null,
+            .reader_thread = null,
+            .running = std.atomic.Value(bool).init(false),
+            .ctx = ctx,
+            .write_mutex = .{},
+        };
+    }
+
+    // warden-eet
+    pub fn deinit(self: *ForeignBridge) void {
+        // Close connection if still open.
+        if (self.conn) |c| {
+            c.close();
+            self.conn = null;
+        }
+        // Close server.
+        self.server.deinit();
+        // Remove socket file.
+        std.fs.cwd().deleteFile(self.socket_path) catch {};
+        // Free socket path.
+        self.allocator.free(self.socket_path);
+        // Deinit ctx.
+        self.ctx.deinit();
+    }
+
+    // warden-eet
+    /// Spawn the child process, wait for it to connect, send the handshake,
+    /// then start the reader thread.
+    pub fn start(self: *ForeignBridge, cmd: []const []const u8) !void {
+        // Build env map = current env + WARDEN_SOCKET.
+        var env_map = try std.process.getEnvMap(self.allocator);
+        defer env_map.deinit();
+        try env_map.put("WARDEN_SOCKET", self.socket_path);
+
+        // Spawn child.
+        var child = std.process.Child.init(cmd, self.allocator);
+        child.env_map = &env_map;
+        try child.spawn();
+        self.child_proc = child;
+
+        // Accept the worker connection (blocks until worker connects).
+        const connection = try self.server.accept();
+        self.conn = connection.stream;
+
+        // Send handshake frame.
+        const handshake = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"kind\":\"handshake\",\"pid\":\"{d}/{d}\",\"socket\":\"{s}\"}}",
+            .{ self.pid.beam, self.pid.proc, self.socket_path },
+        );
+        defer self.allocator.free(handshake);
+        try writeFrame(connection.stream, handshake);
+
+        // Start reader thread.
+        self.running.store(true, .release);
+        const rc = ReaderCtx{ .bridge = self };
+        self.reader_thread = try std.Thread.spawn(.{}, readerThread, .{rc});
+    }
+
+    // warden-eet
+    /// Deliver a message envelope to the connected worker via a msg frame.
+    pub fn deliver(self: *ForeignBridge, msg: MessageEnvelope) !void {
+        const conn = self.conn orelse return error.NotConnected;
+
+        const json = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"kind\":\"msg\",\"type\":\"{s}\",\"id\":\"{s}\",\"from\":\"{s}\",\"to\":\"{s}\",\"body\":null}}",
+            .{ msg.@"type", msg.id, msg.from, msg.to },
+        );
+        defer self.allocator.free(json);
+
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        try writeFrame(conn, json);
+    }
+
+    // warden-eet
+    /// Stop the bridge: signal stop, close connection, join reader thread.
+    pub fn stop(self: *ForeignBridge) !void {
+        self.running.store(false, .release);
+        // Close the connection to unblock the reader thread.
+        if (self.conn) |c| {
+            c.close();
+            self.conn = null;
+        }
+        // Join reader thread.
+        if (self.reader_thread) |t| {
+            t.join();
+            self.reader_thread = null;
+        }
+        // Wait for child process.
+        if (self.child_proc) |*child| {
+            _ = child.wait() catch {};
+            self.child_proc = null;
+        }
+    }
+
+    // warden-eet
+    /// Dispatch a parsed frame by its "kind" field.
+    fn handleFrame(self: *ForeignBridge, kind: []const u8, obj: std.json.ObjectMap) !void {
+        const conn = self.conn orelse return error.NotConnected;
+
+        if (std.mem.eql(u8, kind, "send")) {
+            try self.handleSend(conn, obj);
+        } else if (std.mem.eql(u8, kind, "reply")) {
+            try self.handleReply(conn, obj);
+        } else if (std.mem.eql(u8, kind, "log")) {
+            try self.handleLog(conn, obj);
+        } else if (std.mem.eql(u8, kind, "fs_write")) {
+            try self.handleFsWrite(conn, obj);
+        } else if (std.mem.eql(u8, kind, "fs_read")) {
+            try self.handleFsRead(conn, obj);
+        } else {
+            // Unknown kind — log and skip.
+            self.ctx.note("unknown bridge frame kind", null) catch {};
+        }
+    }
+
+    // warden-eet
+    fn handleSend(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+        const to_str = strField(obj, "to") orelse {
+            try sendError(conn, self.allocator, "missing to");
+            return;
+        };
+        const msg_type = strField(obj, "type") orelse {
+            try sendError(conn, self.allocator, "missing type");
+            return;
+        };
+        const msg_id = strField(obj, "id") orelse {
+            try sendError(conn, self.allocator, "missing id");
+            return;
+        };
+
+        // Parse destination PID.
+        const to_pid = parsePidStr(to_str) catch {
+            try sendError(conn, self.allocator, "invalid to pid");
+            return;
+        };
+
+        const from_str = try std.fmt.allocPrint(
+            self.allocator,
+            "{d}/{d}",
+            .{ self.pid.beam, self.pid.proc },
+        );
+        defer self.allocator.free(from_str);
+
+        const to_pid_str = try self.allocator.dupe(u8, to_str);
+        defer self.allocator.free(to_pid_str);
+
+        const type_dup = try self.allocator.dupe(u8, msg_type);
+        defer self.allocator.free(type_dup);
+
+        const id_dup = try self.allocator.dupe(u8, msg_id);
+        defer self.allocator.free(id_dup);
+
+        const from_dup = try self.allocator.dupe(u8, from_str);
+        defer self.allocator.free(from_dup);
+
+        const msg = MessageEnvelope{
+            .kind = .request,
+            .@"type" = type_dup,
+            .id = id_dup,
+            .from = from_dup,
+            .to = to_pid_str,
+            .body = .null,
+        };
+
+        try self.ctx.send(to_pid, msg);
+
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        try sendOk(conn);
+    }
+
+    // warden-eet
+    fn handleReply(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+        const reply_to_str = strField(obj, "reply_to") orelse {
+            try sendError(conn, self.allocator, "missing reply_to");
+            return;
+        };
+        const msg_type = strField(obj, "type") orelse {
+            try sendError(conn, self.allocator, "missing type");
+            return;
+        };
+        const msg_id = strField(obj, "id") orelse {
+            try sendError(conn, self.allocator, "missing id");
+            return;
+        };
+        const corr = strField(obj, "corr");
+
+        const reply_to_pid = parsePidStr(reply_to_str) catch {
+            try sendError(conn, self.allocator, "invalid reply_to pid");
+            return;
+        };
+
+        const from_str = try std.fmt.allocPrint(
+            self.allocator,
+            "{d}/{d}",
+            .{ self.pid.beam, self.pid.proc },
+        );
+        defer self.allocator.free(from_str);
+
+        const reply_to_dup = try self.allocator.dupe(u8, reply_to_str);
+        defer self.allocator.free(reply_to_dup);
+
+        const type_dup = try self.allocator.dupe(u8, msg_type);
+        defer self.allocator.free(type_dup);
+
+        const id_dup = try self.allocator.dupe(u8, msg_id);
+        defer self.allocator.free(id_dup);
+
+        const from_dup = try self.allocator.dupe(u8, from_str);
+        defer self.allocator.free(from_dup);
+
+        const corr_dup: ?[]const u8 = if (corr) |c| try self.allocator.dupe(u8, c) else null;
+        defer if (corr_dup) |c| self.allocator.free(c);
+
+        const msg = MessageEnvelope{
+            .kind = .response,
+            .@"type" = type_dup,
+            .id = id_dup,
+            .from = from_dup,
+            .to = reply_to_dup,
+            .corr = corr_dup,
+            .body = .null,
+        };
+
+        try self.ctx.send(reply_to_pid, msg);
+
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        try sendOk(conn);
+    }
+
+    // warden-eet
+    fn handleLog(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+        const level = strField(obj, "level") orelse "info";
+        const message = strField(obj, "message") orelse "";
+
+        try self.ctx.log(level, message, null);
+
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        try sendOk(conn);
+    }
+
+    // warden-eet
+    fn handleFsWrite(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+        const ns_str = strField(obj, "ns") orelse {
+            try sendError(conn, self.allocator, "missing ns");
+            return;
+        };
+        const path = strField(obj, "path") orelse {
+            try sendError(conn, self.allocator, "missing path");
+            return;
+        };
+        const data_b64 = strField(obj, "data") orelse {
+            try sendError(conn, self.allocator, "missing data");
+            return;
+        };
+
+        const ns = parseNamespace(ns_str) catch {
+            try sendError(conn, self.allocator, "unknown namespace");
+            return;
+        };
+
+        // Decode base64 data.
+        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64) catch {
+            try sendError(conn, self.allocator, "invalid base64");
+            return;
+        };
+        const decoded = try self.allocator.alloc(u8, decoded_len);
+        defer self.allocator.free(decoded);
+        std.base64.standard.Decoder.decode(decoded, data_b64) catch {
+            try sendError(conn, self.allocator, "base64 decode failed");
+            return;
+        };
+
+        self.ctx.fsWrite(ns, path, decoded) catch |err| {
+            const msg = @errorName(err);
+            try sendError(conn, self.allocator, msg);
+            return;
+        };
+
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        try sendOk(conn);
+    }
+
+    // warden-eet
+    fn handleFsRead(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+        const ns_str = strField(obj, "ns") orelse {
+            try sendError(conn, self.allocator, "missing ns");
+            return;
+        };
+        const path = strField(obj, "path") orelse {
+            try sendError(conn, self.allocator, "missing path");
+            return;
+        };
+
+        const ns = parseNamespace(ns_str) catch {
+            try sendError(conn, self.allocator, "unknown namespace");
+            return;
+        };
+
+        const data = self.ctx.fsRead(ns, path) catch |err| {
+            const msg = @errorName(err);
+            try sendError(conn, self.allocator, msg);
+            return;
+        };
+        defer self.allocator.free(data);
+
+        // Encode to base64.
+        const enc_len = std.base64.standard.Encoder.calcSize(data.len);
+        const encoded = try self.allocator.alloc(u8, enc_len);
+        defer self.allocator.free(encoded);
+        _ = std.base64.standard.Encoder.encode(encoded, data);
+
+        const response = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"kind\":\"ok\",\"data\":\"{s}\"}}",
+            .{encoded},
+        );
+        defer self.allocator.free(response);
+
+        self.write_mutex.lock();
+        defer self.write_mutex.unlock();
+        try writeFrame(conn, response);
+    }
+};
+
+// warden-eet
+/// Parse a "beam/proc" PID string.
+fn parsePidStr(s: []const u8) !Pid {
+    const slash = std.mem.indexOfScalar(u8, s, '/') orelse return error.InvalidPid;
+    const beam = std.fmt.parseInt(u32, s[0..slash], 10) catch return error.InvalidPid;
+    const proc = std.fmt.parseInt(u64, s[slash + 1 ..], 10) catch return error.InvalidPid;
+    return Pid{ .beam = beam, .proc = proc };
+}
+
+// warden-eet
+/// Extract a string field from a JSON object map.
+fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const val = obj.get(key) orelse return null;
+    return switch (val) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+// warden-eet
+/// Supervisor that manages a pool of ForeignBridge instances.
+pub const BridgeSupervisor = struct {
+    allocator: std.mem.Allocator,
+    runtime: *Runtime,
+    bridges: std.ArrayList(*ForeignBridge),
+
+    // warden-eet
+    pub fn init(allocator: std.mem.Allocator, runtime: *Runtime) BridgeSupervisor {
+        return BridgeSupervisor{
+            .allocator = allocator,
+            .runtime = runtime,
+            .bridges = .empty,
+        };
+    }
+
+    // warden-eet
+    pub fn deinit(self: *BridgeSupervisor) void {
+        for (self.bridges.items) |b| {
+            b.deinit();
+            self.allocator.destroy(b);
+        }
+        self.bridges.deinit(self.allocator);
+    }
+
+    // warden-eet
+    /// Spawn a new foreign worker and return its PID.
+    pub fn spawnWorker(
+        self: *BridgeSupervisor,
+        cmd: []const []const u8,
+        log_dir: []const u8,
+        storage_base: []const u8,
+    ) !Pid {
+        const bridge = try self.allocator.create(ForeignBridge);
+        errdefer self.allocator.destroy(bridge);
+
+        bridge.* = try ForeignBridge.init(self.allocator, self.runtime, cmd, log_dir, storage_base);
+        errdefer bridge.deinit();
+
+        try bridge.start(cmd);
+        try self.bridges.append(self.allocator, bridge);
+
+        return bridge.pid;
+    }
+};
