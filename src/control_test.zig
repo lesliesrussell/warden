@@ -370,3 +370,125 @@ test "control server: proc.control pause and resume" {
     rt.registry.mutex.unlock();
     try std.testing.expectEqual(types.ProcessState.ready, after_resume);
 }
+
+// warden-h0j
+test "control server: proc.control kill transitions to exiting" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 88);
+    defer rt.destroy();
+
+    const pid = try rt.registry.spawn(.native_worker, null, .{});
+    try rt.registry.transition(pid, .ready);
+
+    const socket_path = "/tmp/warden_ctrl_test10.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"req_id\":\"k1\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"88/{d}\",\"op\":\"kill\",\"reason\":\"test\"}}}}",
+        .{pid.proc},
+    );
+    defer allocator.free(req);
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(true, parsed.value.object.get("ok").?.bool);
+
+    rt.registry.mutex.lock();
+    const state = rt.registry.map.get(pid.proc).?.state;
+    rt.registry.mutex.unlock();
+    try std.testing.expectEqual(types.ProcessState.exiting, state);
+}
+
+test "control server: proc.control quarantine sets activity_class to tiny" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 89);
+    defer rt.destroy();
+
+    const pid = try rt.registry.spawn(.native_worker, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_test11.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"req_id\":\"q1\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"89/{d}\",\"op\":\"quarantine\"}}}}",
+        .{pid.proc},
+    );
+    defer allocator.free(req);
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(true, parsed.value.object.get("ok").?.bool);
+
+    rt.registry.mutex.lock();
+    const class = rt.registry.map.get(pid.proc).?.policy.activity_class;
+    rt.registry.mutex.unlock();
+    try std.testing.expectEqual(types.ActivityClass.tiny, class);
+}
+
+test "control server: proc.control promote sets activity_class and ttl" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 90);
+    defer rt.destroy();
+
+    const pid = try rt.registry.spawn(.native_worker, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_test12.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = try std.fmt.allocPrint(
+        allocator,
+        "{{\"req_id\":\"pr1\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"90/{d}\",\"op\":\"promote\",\"class\":\"elevated\",\"ttl_ms\":30000}}}}",
+        .{pid.proc},
+    );
+    defer allocator.free(req);
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(true, parsed.value.object.get("ok").?.bool);
+
+    rt.registry.mutex.lock();
+    const entry = rt.registry.map.get(pid.proc).?;
+    const class = entry.policy.activity_class;
+    const ttl = entry.policy.promotion_ttl_ms;
+    rt.registry.mutex.unlock();
+    try std.testing.expectEqual(types.ActivityClass.elevated, class);
+    try std.testing.expectEqual(@as(?u64, 30000), ttl);
+}

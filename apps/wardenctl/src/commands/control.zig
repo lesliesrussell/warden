@@ -18,6 +18,76 @@ pub fn run(
     );
     defer allocator.free(payload);
 
+    try runWithPayload(allocator, client, op, pid, payload, json_output);
+}
+
+// warden-h0j
+pub const PromoteOpts = struct {
+    class: []const u8 = "elevated",
+    ttl_ms: ?u64 = null,
+    reason: ?[]const u8 = null,
+};
+
+pub fn runPromote(
+    allocator: std.mem.Allocator,
+    client: *ControlClient,
+    pid: []const u8,
+    opts: PromoteOpts,
+    json_output: bool,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    try w.print("{{\"pid\":\"{s}\",\"op\":\"promote\",\"class\":\"{s}\"", .{ pid, opts.class });
+    if (opts.ttl_ms) |t| try w.print(",\"ttl_ms\":{d}", .{t});
+    if (opts.reason) |r| {
+        try w.writeAll(",\"reason\":\"");
+        for (r) |c| {
+            if (c == '"' or c == '\\') try w.writeByte('\\');
+            try w.writeByte(c);
+        }
+        try w.writeByte('"');
+    }
+    try w.writeByte('}');
+
+    try runWithPayload(allocator, client, "promote", pid, buf.items, json_output);
+}
+
+pub fn runWithReason(
+    allocator: std.mem.Allocator,
+    client: *ControlClient,
+    op: []const u8,
+    pid: []const u8,
+    reason: ?[]const u8,
+    json_output: bool,
+) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    try w.print("{{\"pid\":\"{s}\",\"op\":\"{s}\"", .{ pid, op });
+    if (reason) |r| {
+        try w.writeAll(",\"reason\":\"");
+        for (r) |c| {
+            if (c == '"' or c == '\\') try w.writeByte('\\');
+            try w.writeByte(c);
+        }
+        try w.writeByte('"');
+    }
+    try w.writeByte('}');
+
+    try runWithPayload(allocator, client, op, pid, buf.items, json_output);
+}
+
+fn runWithPayload(
+    allocator: std.mem.Allocator,
+    client: *ControlClient,
+    op: []const u8,
+    pid: []const u8,
+    payload: []const u8,
+    json_output: bool,
+) !void {
     const resp_bytes = try client.requestWithPayload("proc.control", payload);
     defer allocator.free(resp_bytes);
 

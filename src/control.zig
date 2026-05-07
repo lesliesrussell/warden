@@ -364,37 +364,104 @@ fn handleProcControl(
         return writeFrame(stream, resp);
     };
 
-    const target_state: types.ProcessState = if (std.mem.eql(u8, op_str, "pause"))
-        .paused
-    else if (std.mem.eql(u8, op_str, "resume"))
-        .ready
-    else {
+    const pid = types.Pid{ .beam = beam_id, .proc = proc_id };
+
+    // warden-h0j
+    if (std.mem.eql(u8, op_str, "pause") or std.mem.eql(u8, op_str, "resume")) {
+        const target_state: types.ProcessState = if (std.mem.eql(u8, op_str, "pause")) .paused else .ready;
+        if (cs.runtime.registry.transition(pid, target_state)) |_| {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"{s}\"}}}}",
+                .{ req_id, pid_str, op_str });
+            defer allocator.free(resp);
+            try writeFrame(stream, resp);
+        } else |err| {
+            const msg: []const u8 = switch (err) {
+                error.ProcessNotFound => "process not found",
+                error.InvalidTransition => "invalid state transition",
+                else => "internal error",
+            };
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
+                .{ req_id, msg });
+            defer allocator.free(resp);
+            try writeFrame(stream, resp);
+        }
+    } else if (std.mem.eql(u8, op_str, "kill")) {
+        if (cs.runtime.registry.transition(pid, .exiting)) |_| {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"kill\"}}}}",
+                .{ req_id, pid_str });
+            defer allocator.free(resp);
+            try writeFrame(stream, resp);
+        } else |err| {
+            const msg: []const u8 = switch (err) {
+                error.ProcessNotFound => "process not found",
+                error.InvalidTransition => "invalid state transition",
+                else => "internal error",
+            };
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
+                .{ req_id, msg });
+            defer allocator.free(resp);
+            try writeFrame(stream, resp);
+        }
+    } else if (std.mem.eql(u8, op_str, "quarantine")) {
+        cs.runtime.registry.mutex.lock();
+        const entry = cs.runtime.registry.map.getPtr(pid.proc);
+        if (entry) |e| e.policy.activity_class = .tiny;
+        cs.runtime.registry.mutex.unlock();
+        if (entry == null) {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"process not found\",\"payload\":null}}",
+                .{req_id});
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        }
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"quarantine\"}}}}",
+            .{ req_id, pid_str });
+        defer allocator.free(resp);
+        try writeFrame(stream, resp);
+    } else if (std.mem.eql(u8, op_str, "promote")) {
+        const class_str = switch (payload.object.get("class") orelse .null) {
+            .string => |s| s,
+            else => "elevated",
+        };
+        const ttl_ms = switch (payload.object.get("ttl_ms") orelse .null) {
+            .integer => |n| @as(?u64, @intCast(n)),
+            else => null,
+        };
+        const new_class = std.meta.stringToEnum(types.ActivityClass, class_str) orelse {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown activity class: {s}\",\"payload\":null}}",
+                .{ req_id, class_str });
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        };
+        cs.runtime.registry.mutex.lock();
+        const entry = cs.runtime.registry.map.getPtr(pid.proc);
+        if (entry) |e| {
+            e.policy.activity_class = new_class;
+            e.policy.promotion_ttl_ms = ttl_ms;
+        }
+        cs.runtime.registry.mutex.unlock();
+        if (entry == null) {
+            const resp = try std.fmt.allocPrint(allocator,
+                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"process not found\",\"payload\":null}}",
+                .{req_id});
+            defer allocator.free(resp);
+            return writeFrame(stream, resp);
+        }
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"promote\",\"class\":\"{s}\"}}}}",
+            .{ req_id, pid_str, class_str });
+        defer allocator.free(resp);
+        try writeFrame(stream, resp);
+    } else {
         const resp = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown op: {s}\",\"payload\":null}}",
             .{ req_id, op_str });
-        defer allocator.free(resp);
-        return writeFrame(stream, resp);
-    };
-
-    const pid = types.Pid{ .beam = beam_id, .proc = proc_id };
-
-    const transition_err = cs.runtime.registry.transition(pid, target_state);
-
-    if (transition_err) |_| {
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"{s}\"}}}}",
-            .{ req_id, pid_str, op_str });
-        defer allocator.free(resp);
-        try writeFrame(stream, resp);
-    } else |err| {
-        const msg = switch (err) {
-            error.ProcessNotFound => "process not found",
-            error.InvalidTransition => "invalid state transition",
-            else => "internal error",
-        };
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
-            .{ req_id, msg });
         defer allocator.free(resp);
         try writeFrame(stream, resp);
     }

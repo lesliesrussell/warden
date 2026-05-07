@@ -131,6 +131,47 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         // warden-aai
         if (sub_args.len == 0) return usageErr("pause/resume requires a pid argument (beam/proc)");
         try control_cmd.run(allocator, &client, sub_args[0], subcmd, opts.json_output);
+    } else if (std.mem.eql(u8, subcmd, "kill") or std.mem.eql(u8, subcmd, "quarantine")) {
+        // warden-h0j
+        if (sub_args.len == 0) return usageErr("kill/quarantine requires a pid argument (beam/proc)");
+        var force = false;
+        var reason: ?[]const u8 = null;
+        var j: usize = 1;
+        while (j < sub_args.len) : (j += 1) {
+            const arg = sub_args[j];
+            if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
+                force = true;
+            } else if (std.mem.eql(u8, arg, "--reason")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--reason requires a value");
+                reason = sub_args[j];
+            }
+        }
+        if (!force) return usageErr("kill/quarantine require --force to confirm");
+        try control_cmd.runWithReason(allocator, &client, subcmd, sub_args[0], reason, opts.json_output);
+    } else if (std.mem.eql(u8, subcmd, "promote")) {
+        // warden-h0j
+        if (sub_args.len == 0) return usageErr("promote requires a pid argument (beam/proc)");
+        var promote_opts = control_cmd.PromoteOpts{};
+        var j: usize = 1;
+        while (j < sub_args.len) : (j += 1) {
+            const arg = sub_args[j];
+            if (std.mem.eql(u8, arg, "--class")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--class requires a value");
+                promote_opts.class = sub_args[j];
+            } else if (std.mem.eql(u8, arg, "--ttl")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--ttl requires a duration");
+                promote_opts.ttl_ms = parseDuration(sub_args[j]) catch
+                    return usageErr("--ttl: invalid duration (use 10s, 5m, 1h)");
+            } else if (std.mem.eql(u8, arg, "--reason")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--reason requires a value");
+                promote_opts.reason = sub_args[j];
+            }
+        }
+        try control_cmd.runPromote(allocator, &client, sub_args[0], promote_opts, opts.json_output);
     } else {
         return usageErr("unknown subcommand");
     }
@@ -173,8 +214,11 @@ fn printUsage() void {
         \\  ps             List processes (--beam, --kind, --state)
         \\  topology       Show supervisor tree (--beam)
         \\  logs <pid>     Stream process logs (--since, --grep, --follow)
-        \\  pause <pid>    Pause a process
-        \\  resume <pid>   Resume a paused process
+        \\  pause <pid>          Pause a process
+        \\  resume <pid>         Resume a paused process
+        \\  kill <pid>           Kill a process (requires --force)
+        \\  quarantine <pid>     Restrict process to minimum resources (requires --force)
+        \\  promote <pid>        Promote process activity class (--class, --ttl, --reason)
         \\
         \\Global options:
         \\  --socket <path>   Control socket path (default: $WARDEN_CTRL_SOCKET or ~/.warden/ctrl.sock)
