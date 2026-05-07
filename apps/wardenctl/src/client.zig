@@ -56,11 +56,17 @@ pub const ControlClient = struct {
 
     /// Send an action request and return the raw JSON response. Caller owns the slice.
     pub fn request(self: *ControlClient, action: []const u8) ![]u8 {
+        return self.requestWithPayload(action, "{}");
+    }
+
+    // warden-di6
+    /// Send a request with an explicit JSON payload string. Caller owns the returned slice.
+    pub fn requestWithPayload(self: *ControlClient, action: []const u8, payload_json: []const u8) ![]u8 {
         self.req_counter += 1;
         const req_json = try std.fmt.allocPrint(
             self.allocator,
-            "{{\"req_id\":\"{d}\",\"action\":\"{s}\",\"payload\":{{}}}}",
-            .{ self.req_counter, action },
+            "{{\"req_id\":\"{d}\",\"action\":\"{s}\",\"payload\":{s}}}",
+            .{ self.req_counter, action, payload_json },
         );
         defer self.allocator.free(req_json);
         try writeFrame(self.stream, req_json);

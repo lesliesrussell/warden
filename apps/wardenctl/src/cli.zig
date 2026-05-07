@@ -3,6 +3,8 @@
 const std = @import("std");
 const ControlClient = @import("client.zig").ControlClient;
 const beams_cmd = @import("commands/beams.zig");
+// warden-di6
+const ps_cmd = @import("commands/ps.zig");
 
 // warden-39v
 pub const GlobalOpts = struct {
@@ -61,8 +63,29 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer client.close();
 
     if (std.mem.eql(u8, subcmd, "beams")) {
-        _ = sub_args;
         try beams_cmd.run(allocator, &client, opts.json_output);
+    } else if (std.mem.eql(u8, subcmd, "ps")) {
+        // warden-di6
+        var filter = ps_cmd.Filter{};
+        var j: usize = 0;
+        while (j < sub_args.len) : (j += 1) {
+            const arg = sub_args[j];
+            if (std.mem.eql(u8, arg, "--beam")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--beam requires an id");
+                filter.beam = std.fmt.parseInt(u32, sub_args[j], 10) catch
+                    return usageErr("--beam must be a number");
+            } else if (std.mem.eql(u8, arg, "--kind")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--kind requires a value");
+                filter.kind = sub_args[j];
+            } else if (std.mem.eql(u8, arg, "--state")) {
+                j += 1;
+                if (j >= sub_args.len) return usageErr("--state requires a value");
+                filter.state = sub_args[j];
+            }
+        }
+        try ps_cmd.run(allocator, &client, filter, opts.json_output);
     } else {
         return usageErr("unknown subcommand");
     }
@@ -90,6 +113,7 @@ fn printUsage() void {
         \\
         \\Commands:
         \\  beams       List active beams
+        \\  ps          List processes (--beam, --kind, --state)
         \\
         \\Global options:
         \\  --socket <path>   Control socket path (default: $WARDEN_CTRL_SOCKET or ~/.warden/ctrl.sock)

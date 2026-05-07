@@ -77,3 +77,76 @@ test "control server: unknown action returns ok=false" {
     const obj = parsed.value.object;
     try std.testing.expect(!obj.get("ok").?.bool);
 }
+
+// warden-di6
+test "control server: proc.list returns all spawned processes" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 7);
+    defer rt.destroy();
+
+    _ = try rt.registry.spawn(.native_worker, null, .{});
+    _ = try rt.registry.spawn(.native_supervisor, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_test3.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = "{\"req_id\":\"p1\",\"action\":\"proc.list\",\"payload\":{}}";
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try std.testing.expect(obj.get("ok").?.bool);
+
+    const procs = obj.get("payload").?.object.get("processes").?.array;
+    try std.testing.expectEqual(@as(usize, 2), procs.items.len);
+}
+
+test "control server: proc.list with kind filter" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 8);
+    defer rt.destroy();
+
+    _ = try rt.registry.spawn(.native_worker, null, .{});
+    _ = try rt.registry.spawn(.native_worker, null, .{});
+    _ = try rt.registry.spawn(.native_supervisor, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_test4.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    std.Thread.sleep(5 * std.time.ns_per_ms);
+
+    const stream = try std.net.connectUnixSocket(socket_path);
+    defer stream.close();
+
+    const req = "{\"req_id\":\"p2\",\"action\":\"proc.list\",\"payload\":{\"kind\":\"native_worker\"}}";
+    try control.writeFrame(stream, req);
+
+    const resp_bytes = try control.readFrame(allocator, stream);
+    defer allocator.free(resp_bytes);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
+    defer parsed.deinit();
+
+    const procs = parsed.value.object.get("payload").?.object.get("processes").?.array;
+    // Only the 2 native_workers, not the supervisor.
+    try std.testing.expectEqual(@as(usize, 2), procs.items.len);
+    for (procs.items) |pv| {
+        try std.testing.expectEqualStrings("native_worker", pv.object.get("kind").?.string);
+    }
+}

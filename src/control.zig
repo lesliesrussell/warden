@@ -8,8 +8,10 @@
 
 const std = @import("std");
 const beam_mod = @import("beam.zig");
+const registry_mod = @import("registry.zig");
 
 const Runtime = beam_mod.Runtime;
+const ProcessEntry = registry_mod.ProcessEntry;
 
 // warden-39v
 /// Write a length-prefixed JSON frame to a stream.
@@ -53,6 +55,95 @@ fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []co
     try writeFrame(stream, resp);
 }
 
+// warden-di6
+fn handleProcList(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    // Extract optional filters from payload.
+    var filter_beam: ?u32 = null;
+    var filter_kind: ?[]const u8 = null;
+    var filter_state: ?[]const u8 = null;
+
+    if (payload_val) |pv| {
+        switch (pv) {
+            .object => |p| {
+                if (p.get("beam")) |bv| {
+                    filter_beam = switch (bv) {
+                        .integer => |i| @intCast(i),
+                        else => null,
+                    };
+                }
+                if (p.get("kind")) |kv| {
+                    filter_kind = switch (kv) {
+                        .string => |s| s,
+                        else => null,
+                    };
+                }
+                if (p.get("state")) |sv| {
+                    filter_state = switch (sv) {
+                        .string => |s| s,
+                        else => null,
+                    };
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Snapshot matching entries under the registry lock.
+    var entries: std.ArrayList(ProcessEntry) = .empty;
+    defer entries.deinit(allocator);
+
+    cs.runtime.registry.mutex.lock();
+    var it = cs.runtime.registry.map.iterator();
+    while (it.next()) |kv| {
+        const e = kv.value_ptr.*;
+        if (filter_beam) |fb| {
+            if (e.pid.beam != fb) continue;
+        }
+        if (filter_kind) |fk| {
+            if (!std.mem.eql(u8, @tagName(e.kind), fk)) continue;
+        }
+        if (filter_state) |fs| {
+            if (!std.mem.eql(u8, @tagName(e.state), fs)) continue;
+        }
+        try entries.append(allocator, e);
+    }
+    cs.runtime.registry.mutex.unlock();
+
+    const now = std.time.milliTimestamp();
+
+    // Build JSON response.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+
+    try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"processes\":[", .{req_id});
+
+    for (entries.items, 0..) |e, idx| {
+        if (idx > 0) try w.writeByte(',');
+        try w.print(
+            "{{\"beam\":{d},\"pid\":{d},\"kind\":\"{s}\",\"state\":\"{s}\"," ++
+            "\"policy\":\"{s}\",\"last_active_ms\":{d}}}",
+            .{
+                e.pid.beam,
+                e.pid.proc,
+                @tagName(e.kind),
+                @tagName(e.state),
+                @tagName(e.policy.activity_class),
+                now - e.last_active_at,
+            },
+        );
+    }
+
+    try w.writeAll("]}}}}");
+    try writeFrame(stream, buf.items);
+}
+
 // warden-39v
 fn handleConnection(cs: *ControlServer, stream: std.net.Stream) !void {
     const allocator = cs.allocator;
@@ -77,8 +168,13 @@ fn handleConnection(cs: *ControlServer, stream: std.net.Stream) !void {
         else => return error.InvalidAction,
     };
 
+    const payload_val = obj.get("payload");
+
     if (std.mem.eql(u8, action, "beam.list")) {
         try handleBeamList(cs, allocator, req_id, stream);
+    } else if (std.mem.eql(u8, action, "proc.list")) {
+        // warden-di6
+        try handleProcList(cs, allocator, req_id, stream, payload_val);
     } else {
         const err_resp = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown action: {s}\",\"payload\":null}}",
