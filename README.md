@@ -96,6 +96,21 @@ A tool worker emits excessive log volume. The watchdog pauses it, waits for a co
 
 See `examples/watchdog_intervention/` and `src/watchdog_intervention_test.zig`.
 
+### Live demo — Python workers under Zig supervision
+
+Two Python workers run as supervised children of a Zig supervisor: a math service
+(Fibonacci, primes) and an HTTP server. The test drives the full lifecycle:
+
+```
+[registry]  math_worker and web_server appear in proc.list
+[topology]  supervisor has 2 children
+[messaging] req.fib(10) → res.ok body=55   (round-trip through ForeignBridge)
+[http]      GET /status → HTTP 200 {"status":"ok"}
+[lifecycle] pause math_worker → state=paused; resume → state=running
+```
+
+See `examples/live_demo/` and `src/live_demo_test.zig`.
+
 ---
 
 ## wardenctl — runtime CLI
@@ -246,7 +261,7 @@ const bytes = try ctx.fsRead(.proc_state, "checkpoint");
 Requires Zig 0.15.2.
 
 ```bash
-zig build test     # run all 104 tests
+zig build test     # run all 106 tests
 zig build          # compile wardenctl + runtime library
 ```
 
