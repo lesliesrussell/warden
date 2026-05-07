@@ -98,6 +98,34 @@ See `examples/watchdog_intervention/` and `src/watchdog_intervention_test.zig`.
 
 ---
 
+## wardenctl — runtime CLI
+
+`wardenctl` is a standalone CLI for inspecting and controlling a live Warden runtime over its Unix socket.
+
+```bash
+wardenctl [--socket <path>] [--json] <command>
+
+Commands:
+  beams                    List active beams
+  ps [--beam N] [--kind K] [--state S]
+                           List processes with optional filters
+  topology [--beam N]      Show supervisor tree (ASCII)
+  logs <beam/proc> [--since 10s] [--grep pattern] [--follow]
+                           Stream per-process NDJSON log
+  pause <beam/proc>        Pause a process
+  resume <beam/proc>       Resume a paused process
+  kill <beam/proc> --force [--reason '...']
+                           Transition process to exiting
+  quarantine <beam/proc> --force [--reason '...']
+                           Restrict process to minimum resources
+  promote <beam/proc> [--class elevated] [--ttl 30s] [--reason '...']
+                           Promote process activity class
+```
+
+The runtime exposes a Unix socket at `~/.warden/ctrl.sock` by default (override with `$WARDEN_CTRL_SOCKET` or `--socket`).
+
+---
+
 ## Reference topologies
 
 Three concrete supervisor trees showing how Warden maps to real agent architectures:
@@ -218,8 +246,8 @@ const bytes = try ctx.fsRead(.proc_state, "checkpoint");
 Requires Zig 0.15.2.
 
 ```bash
-zig build test     # run all 97 tests
-zig build          # compile
+zig build test     # run all 104 tests
+zig build          # compile wardenctl + runtime library
 ```
 
 ---
