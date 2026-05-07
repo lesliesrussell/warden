@@ -12,6 +12,8 @@ pub const scheduler = @import("scheduler.zig");
 pub const policy = @import("policy.zig");
 // warden-554
 pub const logger = @import("logger.zig");
+// warden-dhx
+pub const supervisor = @import("supervisor.zig");
 
 comptime {
     _ = @import("types_test.zig");
@@ -26,4 +28,6 @@ comptime {
     _ = @import("policy_test.zig");
     // warden-554
     _ = @import("logger_test.zig");
+    // warden-dhx
+    _ = @import("supervisor_test.zig");
 }
