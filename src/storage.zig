@@ -58,6 +58,8 @@ fn validateRelPath(path: []const u8) StorageError!void {
 //   e.g. read(.shared_vol, "myvol/foo.txt") → <base>/vol/myvol/foo.txt
 //   Access is denied unless "myvol" is in the granted set.
 pub const StorageView = struct {
+    // warden-lmm: Zig 0.16 routes filesystem I/O through std.Io.
+    io: std.Io,
     allocator: std.mem.Allocator,
     base_dir: []const u8,
     pid: Pid,
@@ -71,12 +73,14 @@ pub const StorageView = struct {
 
     // warden-h12
     pub fn init(
+        io: std.Io,
         allocator: std.mem.Allocator,
         base_dir: []const u8,
         pid: Pid,
         policy: PolicyEnvelope,
     ) !StorageView {
         return StorageView{
+            .io = io,
             .allocator = allocator,
             .base_dir = base_dir,
             .pid = pid,
@@ -182,10 +186,10 @@ pub const StorageView = struct {
 
     // warden-h12
     // Ensure parent directories exist for a file path.
-    fn ensureParentDirs(abs_path: []const u8) !void {
+    fn ensureParentDirs(io: std.Io, abs_path: []const u8) !void {
         const dir_end = std.mem.lastIndexOfScalar(u8, abs_path, '/') orelse return;
         const dir_path = abs_path[0..dir_end];
-        std.fs.cwd().makePath(dir_path) catch |err| switch (err) {
+        std.Io.Dir.cwd().createDirPath(io, dir_path) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -197,13 +201,10 @@ pub const StorageView = struct {
         const abs = try self.resolvePath(ns, path);
         defer self.allocator.free(abs);
 
-        const file = std.fs.openFileAbsolute(abs, .{}) catch |err| switch (err) {
+        return std.Io.Dir.cwd().readFileAlloc(self.io, abs, self.allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => return StorageError.NotFound,
             else => return err,
         };
-        defer file.close();
-
-        return file.readToEndAlloc(self.allocator, std.math.maxInt(usize));
     }
 
     // warden-h12
@@ -217,18 +218,20 @@ pub const StorageView = struct {
         const bytes_field = self.bytesPtr(ns);
         var old_size: u64 = 0;
         if (bytes_field != null) {
-            old_size = fileSizeAbsolute(abs) catch 0;
+            old_size = fileSizeAbsolute(self.io, abs) catch 0;
             const new_total = (bytes_field.?.* -| old_size) + data.len;
             if (new_total > self.quotaLimit(ns)) {
                 return StorageError.QuotaExceeded;
             }
         }
 
-        try ensureParentDirs(abs);
+        try ensureParentDirs(self.io, abs);
 
-        const file = try std.fs.createFileAbsolute(abs, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(data);
+        try std.Io.Dir.cwd().writeFile(self.io, .{
+            .sub_path = abs,
+            .data = data,
+            .flags = .{ .truncate = true },
+        });
 
         if (bytes_field) |bf| {
             bf.* = bf.* -| old_size;
@@ -251,21 +254,28 @@ pub const StorageView = struct {
             }
         }
 
-        try ensureParentDirs(abs);
+        try ensureParentDirs(self.io, abs);
 
         const file = blk: {
-            if (std.fs.openFileAbsolute(abs, .{ .mode = .read_write })) |f| {
+            if (std.Io.Dir.openFileAbsolute(self.io, abs, .{ .mode = .read_write })) |f| {
                 break :blk f;
             } else |err| {
                 if (err == error.FileNotFound) {
-                    break :blk try std.fs.createFileAbsolute(abs, .{});
+                    break :blk try std.Io.Dir.createFileAbsolute(self.io, abs, .{});
                 }
                 return err;
             }
         };
-        defer file.close();
-        try file.seekFromEnd(0);
-        try file.writeAll(data);
+        defer file.close(self.io);
+
+        // warden-lmm: 0.16 File has no seekFromEnd; use a positional writer
+        // anchored at end-of-file to append.
+        const st = try file.stat(self.io);
+        var wbuf: [4096]u8 = undefined;
+        var w = std.Io.File.Writer.init(file, self.io, &wbuf);
+        w.pos = st.size;
+        try w.interface.writeAll(data);
+        try w.interface.flush();
 
         if (bytes_field) |bf| {
             bf.* += data.len;
@@ -278,25 +288,26 @@ pub const StorageView = struct {
         const abs = try self.resolvePath(ns, path);
         defer self.allocator.free(abs);
 
-        var dir = std.fs.openDirAbsolute(abs, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = std.Io.Dir.openDirAbsolute(self.io, abs, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return StorageError.NotFound,
             else => return err,
         };
-        defer dir.close();
+        defer dir.close(self.io);
 
-        var entries = std.ArrayList([]u8).init(self.allocator);
+        // warden-lmm: 0.16 ArrayList is unmanaged; allocator passed per call.
+        var entries: std.ArrayList([]u8) = .empty;
         errdefer {
             for (entries.items) |e| self.allocator.free(e);
-            entries.deinit();
+            entries.deinit(self.allocator);
         }
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(self.io)) |entry| {
             const name = try self.allocator.dupe(u8, entry.name);
-            try entries.append(name);
+            try entries.append(self.allocator, name);
         }
 
-        return entries.toOwnedSlice();
+        return entries.toOwnedSlice(self.allocator);
     }
 
     // warden-h12
@@ -308,10 +319,10 @@ pub const StorageView = struct {
         const bytes_field = self.bytesPtr(ns);
         var old_size: u64 = 0;
         if (bytes_field != null) {
-            old_size = fileSizeAbsolute(abs) catch 0;
+            old_size = fileSizeAbsolute(self.io, abs) catch 0;
         }
 
-        std.fs.deleteFileAbsolute(abs) catch |err| switch (err) {
+        std.Io.Dir.deleteFileAbsolute(self.io, abs) catch |err| switch (err) {
             error.FileNotFound => return StorageError.NotFound,
             else => return err,
         };
@@ -327,7 +338,7 @@ pub const StorageView = struct {
         const abs = try self.resolvePath(ns, path);
         defer self.allocator.free(abs);
 
-        const st = std.fs.cwd().statFile(abs) catch |err| switch (err) {
+        const st = std.Io.Dir.cwd().statFile(self.io, abs, .{}) catch |err| switch (err) {
             error.FileNotFound => return StorageError.NotFound,
             else => return err,
         };
@@ -347,10 +358,8 @@ pub const StorageView = struct {
         );
         defer self.allocator.free(abs);
 
-        std.fs.deleteTreeAbsolute(abs) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
+        // warden-lmm: 0.16 deleteTree is idempotent (no FileNotFound).
+        try std.Io.Dir.cwd().deleteTree(self.io, abs);
         self.bytes_temp = 0;
     }
 
@@ -367,14 +376,14 @@ pub const StorageView = struct {
         );
         defer self.allocator.free(cache_root);
 
-        var dir = std.fs.openDirAbsolute(cache_root, .{ .iterate = true }) catch |err| switch (err) {
+        var dir = std.Io.Dir.openDirAbsolute(self.io, cache_root, .{ .iterate = true }) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
-        defer dir.close();
+        defer dir.close(self.io);
 
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(self.io)) |entry| {
             if (self.bytes_cache <= bytes_limit) break;
             if (entry.kind != .file) continue;
 
@@ -385,8 +394,8 @@ pub const StorageView = struct {
             );
             defer self.allocator.free(file_path);
 
-            const fsize = fileSizeAbsolute(file_path) catch 0;
-            std.fs.deleteFileAbsolute(file_path) catch continue;
+            const fsize = fileSizeAbsolute(self.io, file_path) catch 0;
+            std.Io.Dir.deleteFileAbsolute(self.io, file_path) catch continue;
             self.bytes_cache -|= fsize;
         }
     }
@@ -394,9 +403,9 @@ pub const StorageView = struct {
 
 // warden-h12
 // Helper: get file size by absolute path, returns 0 if not found.
-fn fileSizeAbsolute(abs_path: []const u8) !u64 {
-    const file = try std.fs.openFileAbsolute(abs_path, .{});
-    defer file.close();
-    const st = try file.stat();
+fn fileSizeAbsolute(io: std.Io, abs_path: []const u8) !u64 {
+    const file = try std.Io.Dir.openFileAbsolute(io, abs_path, .{});
+    defer file.close(io);
+    const st = try file.stat(io);
     return st.size;
 }

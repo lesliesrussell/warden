@@ -1,6 +1,7 @@
 // warden-45x
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const fd = @import("topology_failure_demo.zig");
@@ -10,7 +11,7 @@ test "failure recovery: hung worker is replaced, session PID unchanged, task 2 c
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 8);
@@ -71,7 +72,7 @@ test "failure recovery: worker completes both tasks when hang_after_first is fal
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 8);

@@ -1,6 +1,7 @@
 // warden-h12
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const types = @import("types.zig");
 const storage_mod = @import("storage.zig");
 
@@ -32,10 +33,10 @@ const TestView = struct {
         policy: PolicyEnvelope,
     ) !TestView {
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const base = try tmp.dir.realpath(".", &path_buf);
+        const base = try testutil.tmpAbs(&path_buf, tmp);
         const base_owned = try allocator.dupe(u8, base);
         errdefer allocator.free(base_owned);
-        const view = try StorageView.init(allocator, base_owned, testPid(), policy);
+        const view = try StorageView.init(std.testing.io, allocator, base_owned, testPid(), policy);
         return TestView{
             .base_dir = base_owned,
             .view = view,

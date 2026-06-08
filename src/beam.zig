@@ -90,6 +90,10 @@ pub const Runtime = struct {
     /// Per-process mailboxes, keyed by pid.proc.
     mailboxes: std.AutoHashMap(u64, *Mailbox),
     mailboxes_mutex: sync.Mutex,
+    // warden-lmm: Zig 0.16 routes filesystem I/O through std.Io; Runtime owns
+    // the threaded executor (io holds &io_exec; Runtime is heap-stable).
+    io_exec: std.Io.Threaded,
+    io: std.Io,
 
     // warden-7q1
     /// Allocate a Runtime on the heap. Returns an owned pointer.
@@ -101,6 +105,8 @@ pub const Runtime = struct {
 
         self.allocator = allocator;
         self.beam_id = beam_id;
+        self.io_exec = std.Io.Threaded.init(allocator, .{});
+        self.io = self.io_exec.io();
         self.registry = Registry.init(allocator, beam_id);
         self.mailboxes_mutex = .{};
         self.mailboxes = std.AutoHashMap(u64, *Mailbox).init(allocator);
@@ -131,6 +137,7 @@ pub const Runtime = struct {
         self.mailboxes_mutex.unlock();
 
         self.registry.deinit();
+        self.io_exec.deinit();
     }
 
     // warden-7q1
@@ -184,18 +191,19 @@ pub const Ctx = struct {
         log_dir: []const u8,
         storage_base: []const u8,
     ) !Ctx {
-        // Open (or create) the log directory.
-        try std.fs.cwd().makePath(log_dir);
-        const dir = try std.fs.cwd().openDir(log_dir, .{});
+        // Open (or create) the log directory. warden-lmm: fs via std.Io.
+        try std.Io.Dir.cwd().createDirPath(runtime.io, log_dir);
+        const dir = try std.Io.Dir.cwd().openDir(runtime.io, log_dir, .{});
 
         // ProcessLogger must not be moved after init (file_writer holds &self.buf).
         // Use initInPlace so the struct is initialised directly in heap memory.
         const pl = try runtime.allocator.create(ProcessLogger);
         errdefer runtime.allocator.destroy(pl);
-        try pl.initInPlace(runtime.allocator, runtime.beam_id, pid.proc, dir);
+        try pl.initInPlace(runtime.io, runtime.allocator, runtime.beam_id, pid.proc, dir);
         errdefer pl.deinit();
 
         const sv = try StorageView.init(
+            runtime.io,
             runtime.allocator,
             storage_base,
             pid,

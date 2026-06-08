@@ -222,9 +222,11 @@ pub const ProcessLogger = struct {
     allocator: std.mem.Allocator,
     beam_id: u32,
     pid: u64,
-    file: std.fs.File,
+    // warden-lmm: Zig 0.16 — File I/O routes through std.Io; the writer caches io.
+    io: std.Io,
+    file: std.Io.File,
     buf: [4096]u8,
-    file_writer: std.fs.File.Writer,
+    file_writer: std.Io.File.Writer,
     seq: u64,
 
     // warden-554
@@ -235,22 +237,26 @@ pub const ProcessLogger = struct {
     /// because file_writer holds &self.buf which must not move after init.
     pub fn initInPlace(
         self: *ProcessLogger,
+        io: std.Io,
         allocator: std.mem.Allocator,
         beam_id: u32,
         pid: u64,
-        log_dir: std.fs.Dir,
+        log_dir: std.Io.Dir,
     ) !void {
         const filename = try std.fmt.allocPrint(allocator, "{d}-{d}.log", .{ beam_id, pid });
         defer allocator.free(filename);
 
-        const file = try log_dir.createFile(filename, .{
+        const file = try log_dir.createFile(io, filename, .{
             .truncate = false,
             .exclusive = false,
         });
-        errdefer file.close();
+        errdefer file.close(io);
 
-        try file.seekFromEnd(0);
+        // warden-lmm: 0.16 File has no seekFromEnd; use a positional writer and
+        // start at end-of-file so the log stays append-only across restarts.
+        const st = try file.stat(io);
 
+        self.io = io;
         self.allocator = allocator;
         self.beam_id = beam_id;
         self.pid = pid;
@@ -258,30 +264,33 @@ pub const ProcessLogger = struct {
         self.buf = undefined;
         self.seq = 0;
         // file_writer stores &self.buf — must be set after self is stable.
-        self.file_writer = std.fs.File.Writer.initStreaming(file, &self.buf);
+        self.file_writer = std.Io.File.Writer.init(file, io, &self.buf);
+        self.file_writer.pos = st.size;
     }
 
     // Keep the old init for callers that rely on RLS (single-assignment, no errdefer).
     pub fn init(
+        io: std.Io,
         allocator: std.mem.Allocator,
         beam_id: u32,
         pid: u64,
-        log_dir: std.fs.Dir,
+        log_dir: std.Io.Dir,
     ) !ProcessLogger {
         const filename = try std.fmt.allocPrint(allocator, "{d}-{d}.log", .{ beam_id, pid });
         defer allocator.free(filename);
 
-        const file = try log_dir.createFile(filename, .{
+        const file = try log_dir.createFile(io, filename, .{
             .truncate = false,
             .exclusive = false,
         });
-        errdefer file.close();
+        errdefer file.close(io);
 
-        try file.seekFromEnd(0);
+        const st = try file.stat(io);
 
         // RLS places `self` at the caller's result location, so &self.buf is
         // stable. Safe ONLY when the caller does `var x: ProcessLogger = try init(...)`.
         var self: ProcessLogger = .{
+            .io = io,
             .allocator = allocator,
             .beam_id = beam_id,
             .pid = pid,
@@ -290,14 +299,15 @@ pub const ProcessLogger = struct {
             .file_writer = undefined,
             .seq = 0,
         };
-        self.file_writer = std.fs.File.Writer.initStreaming(file, &self.buf);
+        self.file_writer = std.Io.File.Writer.init(file, io, &self.buf);
+        self.file_writer.pos = st.size;
         return self;
     }
 
     // warden-554
     pub fn deinit(self: *ProcessLogger) void {
         self.file_writer.interface.flush() catch {};
-        self.file.close();
+        self.file.close(self.io);
     }
 
     // warden-554

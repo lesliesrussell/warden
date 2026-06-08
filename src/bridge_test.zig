@@ -1,6 +1,7 @@
 // warden-eet
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const bridge = @import("bridge.zig");
 const beam_mod = @import("beam.zig");
 
@@ -62,9 +63,9 @@ test "ForeignBridge.init and deinit" {
     var tmp_storage = std.testing.tmpDir(.{});
     defer tmp_storage.cleanup();
 
-    const log_path = try tmp_log.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp_log);
     defer allocator.free(log_path);
-    const storage_path = try tmp_storage.dir.realpathAlloc(allocator, ".");
+    const storage_path = try testutil.tmpAbsAlloc(allocator, &tmp_storage);
     defer allocator.free(storage_path);
 
     const cmd = &[_][]const u8{"/bin/true"};

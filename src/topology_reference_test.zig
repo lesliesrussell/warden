@@ -1,6 +1,7 @@
 // warden-7hi
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const ca = @import("topology_code_assistant.zig");
@@ -12,7 +13,7 @@ test "code assistant topology boots and shuts down cleanly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);
@@ -33,7 +34,7 @@ test "code assistant watchdog pauses planner on budget_exceeded" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);
@@ -85,7 +86,7 @@ test "research agent topology boots and shuts down cleanly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);
@@ -106,7 +107,7 @@ test "research agent ranker fans out to all retrievers" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);
@@ -147,7 +148,7 @@ test "ETL topology boots and shuts down cleanly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);
@@ -168,7 +169,7 @@ test "ETL pipeline runs extract→transform→load and checkpoints progress" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);

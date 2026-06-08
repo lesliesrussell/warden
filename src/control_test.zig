@@ -1,6 +1,7 @@
 // warden-39v
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const env = @import("env.zig");
 const clock = @import("clock.zig");
 const beam = @import("beam.zig");
@@ -212,16 +213,16 @@ test "control server: logs.stream reads log file by pid" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     // Write a synthetic log file for beam=33, proc=7.
     {
-        const lf = try tmp.dir.createFile("33-7.log", .{});
-        defer lf.close();
-        try lf.writeAll("{\"ts\":1000.0,\"beam\":33,\"pid\":7,\"seq\":1,\"event\":\"note\",\"msg\":\"hello\"}\n");
-        try lf.writeAll("{\"ts\":1001.0,\"beam\":33,\"pid\":7,\"seq\":2,\"event\":\"note\",\"msg\":\"world\"}\n");
-        try lf.writeAll("{\"ts\":1002.0,\"beam\":33,\"pid\":7,\"seq\":3,\"event\":\"metric\",\"name\":\"latency_ms\",\"value\":3}\n");
+        const lf = try tmp.dir.createFile(std.testing.io, "33-7.log", .{});
+        defer lf.close(std.testing.io);
+        try lf.writeStreamingAll(std.testing.io, "{\"ts\":1000.0,\"beam\":33,\"pid\":7,\"seq\":1,\"event\":\"note\",\"msg\":\"hello\"}\n");
+        try lf.writeStreamingAll(std.testing.io, "{\"ts\":1001.0,\"beam\":33,\"pid\":7,\"seq\":2,\"event\":\"note\",\"msg\":\"world\"}\n");
+        try lf.writeStreamingAll(std.testing.io, "{\"ts\":1002.0,\"beam\":33,\"pid\":7,\"seq\":3,\"event\":\"metric\",\"name\":\"latency_ms\",\"value\":3}\n");
     }
 
     const rt = try beam.Runtime.init(allocator, 33);
@@ -263,15 +264,15 @@ test "control server: logs.stream grep filter" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     {
-        const lf = try tmp.dir.createFile("34-8.log", .{});
-        defer lf.close();
-        try lf.writeAll("{\"ts\":1000.0,\"event\":\"note\",\"msg\":\"tool_call started\"}\n");
-        try lf.writeAll("{\"ts\":1001.0,\"event\":\"note\",\"msg\":\"unrelated log\"}\n");
-        try lf.writeAll("{\"ts\":1002.0,\"event\":\"note\",\"msg\":\"tool_call finished\"}\n");
+        const lf = try tmp.dir.createFile(std.testing.io, "34-8.log", .{});
+        defer lf.close(std.testing.io);
+        try lf.writeStreamingAll(std.testing.io, "{\"ts\":1000.0,\"event\":\"note\",\"msg\":\"tool_call started\"}\n");
+        try lf.writeStreamingAll(std.testing.io, "{\"ts\":1001.0,\"event\":\"note\",\"msg\":\"unrelated log\"}\n");
+        try lf.writeStreamingAll(std.testing.io, "{\"ts\":1002.0,\"event\":\"note\",\"msg\":\"tool_call finished\"}\n");
     }
 
     const rt = try beam.Runtime.init(allocator, 34);
@@ -512,9 +513,7 @@ test "control server: sidecar written on start, removed on stop" {
     const sidecar_path = try std.fmt.allocPrint(allocator, "{s}/.warden/sockets/91.json", .{home});
     defer allocator.free(sidecar_path);
 
-    const sidecar_file = try std.fs.openFileAbsolute(sidecar_path, .{});
-    defer sidecar_file.close();
-    const content = try sidecar_file.readToEndAlloc(allocator, 4096);
+    const content = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, sidecar_path, allocator, .limited(4096));
     defer allocator.free(content);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});

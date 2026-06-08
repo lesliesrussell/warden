@@ -1,6 +1,7 @@
 // warden-5l5
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const wi = @import("topology_watchdog_demo.zig");
@@ -10,7 +11,7 @@ test "watchdog intervention: worker paused on quota breach, resumed after cooldo
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);
@@ -53,7 +54,7 @@ test "watchdog intervention: session supervisor PID stable, only worker affected
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const log_path = try tmp.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp);
     defer allocator.free(log_path);
 
     const rt = try beam.Runtime.init(allocator, 10);

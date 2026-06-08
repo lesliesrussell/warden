@@ -16,6 +16,7 @@
 //   6. Resuming transitions back to "running".
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const clock = @import("clock.zig");
 const beam_mod = @import("beam.zig");
 const bridge = @import("bridge.zig");
@@ -75,9 +76,9 @@ test "live demo: topology and messaging" {
     defer tmp_log.cleanup();
     var tmp_store = std.testing.tmpDir(.{});
     defer tmp_store.cleanup();
-    const log_path = try tmp_log.dir.realpathAlloc(allocator, ".");
+    const log_path = try testutil.tmpAbsAlloc(allocator, &tmp_log);
     defer allocator.free(log_path);
-    const store_path = try tmp_store.dir.realpathAlloc(allocator, ".");
+    const store_path = try testutil.tmpAbsAlloc(allocator, &tmp_store);
     defer allocator.free(store_path);
 
     // ── bridge supervisor ─────────────────────────────────────────────────────

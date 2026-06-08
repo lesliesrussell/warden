@@ -1,6 +1,7 @@
 // warden-1ud
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const topology = @import("topology.zig");
@@ -12,12 +13,6 @@ const Pid = beam.Pid;
 const MessageEnvelope = beam.MessageEnvelope;
 
 // warden-1ud
-/// Build a tmpDir path string into a fixed-size buffer.
-fn realpath(dir: std.fs.Dir, buf: []u8) ![]u8 {
-    return dir.realpath(".", buf);
-}
-
-// warden-1ud
 test "Topology.init + start boots without panic" {
     const allocator = std.testing.allocator;
 
@@ -27,9 +22,9 @@ test "Topology.init + start boots without panic" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 100);
     defer rt.destroy();
@@ -61,9 +56,9 @@ test "planner -> tool_worker round trip: send run_task, verify task_result arriv
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 101);
     defer rt.destroy();
@@ -160,9 +155,9 @@ test "watchdog responds to health_check with health_ok" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 102);
     defer rt.destroy();
@@ -248,9 +243,9 @@ test "Topology.shutdown tears down cleanly (no hanging threads)" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 103);
     defer rt.destroy();
@@ -283,9 +278,9 @@ test "trace_id and session_id appear in log output" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 104);
     defer rt.destroy();
@@ -335,15 +330,15 @@ test "trace_id and session_id appear in log output" {
     topo.deinit();
 
     // Read all log files in log_dir and verify trace_id + session_id appear.
-    var log_d = try std.fs.openDirAbsolute(log_dir, .{ .iterate = true });
-    defer log_d.close();
+    var log_d = try std.Io.Dir.openDirAbsolute(std.testing.io, log_dir, .{ .iterate = true });
+    defer log_d.close(std.testing.io);
 
     var found_trace = false;
     var found_session = false;
     var it = log_d.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(std.testing.io)) |entry| {
         if (entry.kind != .file) continue;
-        const content = log_d.readFileAlloc(allocator, entry.name, 1024 * 1024) catch continue;
+        const content = log_d.readFileAlloc(std.testing.io, entry.name, allocator, .limited(1024 * 1024)) catch continue;
         defer allocator.free(content);
         if (std.mem.indexOf(u8, content, "trace-xyz-unique") != null) found_trace = true;
         if (std.mem.indexOf(u8, content, "log-trace-session") != null) found_session = true;

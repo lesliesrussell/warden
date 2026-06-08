@@ -9,7 +9,7 @@ test "seq is strictly monotonic" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var log = try logger.ProcessLogger.init(allocator, 1, 100, tmp.dir);
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, 1, 100, tmp.dir);
     defer log.deinit();
 
     const n = 10;
@@ -30,12 +30,12 @@ test "log file is named <beam>-<pid>.log" {
     const beam_id: u32 = 7;
     const pid: u64 = 42;
 
-    var log = try logger.ProcessLogger.init(allocator, beam_id, pid, tmp.dir);
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, beam_id, pid, tmp.dir);
     defer log.deinit();
 
     // File should exist with the right name
-    const f = try tmp.dir.openFile("7-42.log", .{});
-    f.close();
+    const f = try tmp.dir.openFile(std.testing.io, "7-42.log", .{});
+    f.close(std.testing.io);
 }
 
 // warden-554
@@ -44,15 +44,13 @@ test "note event appears in file with correct fields" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var log = try logger.ProcessLogger.init(allocator, 1, 55, tmp.dir);
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, 1, 55, tmp.dir);
     try log.note("info", "hello from test", null);
     try log.flush();
     log.deinit();
 
     // Read back
-    const file = try tmp.dir.openFile("1-55.log", .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    const content = try tmp.dir.readFileAlloc(std.testing.io, "1-55.log", allocator, .limited(64 * 1024));
     defer allocator.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "\"event\":\"note\"") != null);
@@ -66,7 +64,7 @@ test "recv event appears with msg_id field" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var log = try logger.ProcessLogger.init(allocator, 2, 77, tmp.dir);
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, 2, 77, tmp.dir);
     try log.emit(.{ .recv = .{
         .msg_id = "msg-001",
         .from = "pid:1/10",
@@ -78,9 +76,7 @@ test "recv event appears with msg_id field" {
     try log.flush();
     log.deinit();
 
-    const file = try tmp.dir.openFile("2-77.log", .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    const content = try tmp.dir.readFileAlloc(std.testing.io, "2-77.log", allocator, .limited(64 * 1024));
     defer allocator.free(content);
 
     try std.testing.expect(std.mem.indexOf(u8, content, "\"event\":\"recv\"") != null);
@@ -94,7 +90,7 @@ test "flush produces readable NDJSON" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var log = try logger.ProcessLogger.init(allocator, 3, 99, tmp.dir);
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, 3, 99, tmp.dir);
     try log.emit(.{ .spawn = .{ .kind = "native_worker", .parent_pid = 1 } }, null);
     try log.note("info", "started", null);
     try log.metric("reductions", 1234.0, null);
@@ -104,9 +100,7 @@ test "flush produces readable NDJSON" {
     log.deinit();
 
     // Read the file and parse each line as JSON
-    const file = try tmp.dir.openFile("3-99.log", .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    const content = try tmp.dir.readFileAlloc(std.testing.io, "3-99.log", allocator, .limited(64 * 1024));
     defer allocator.free(content);
 
     var line_count: usize = 0;
@@ -138,16 +132,14 @@ test "seq starts at 1 and increments" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    var log = try logger.ProcessLogger.init(allocator, 4, 200, tmp.dir);
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, 4, 200, tmp.dir);
     try log.emit(.{ .spawn = .{} }, null);
     try log.emit(.{ .exit = .{} }, null);
     try log.emit(.{ .note = .{ .message = "third" } }, null);
     try log.flush();
     log.deinit();
 
-    const file = try tmp.dir.openFile("4-200.log", .{});
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 64 * 1024);
+    const content = try tmp.dir.readFileAlloc(std.testing.io, "4-200.log", allocator, .limited(64 * 1024));
     defer allocator.free(content);
 
     var seq: u64 = 1;

@@ -1,6 +1,7 @@
 // warden-7q1
 
 const std = @import("std");
+const testutil = @import("testutil.zig");
 const beam = @import("beam.zig");
 
 const Pid = beam.Pid;
@@ -46,9 +47,9 @@ test "send + recv round trip between two Ctx instances" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 1);
     defer rt.destroy();
@@ -104,9 +105,9 @@ test "call + reply: A calls B, B replies, A gets response" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 2);
     defer rt.destroy();
@@ -197,9 +198,9 @@ test "spawn allocates a new PID and it appears in registry" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 3);
     defer rt.destroy();
@@ -230,9 +231,9 @@ test "promote changes activity class via policy engine" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 4);
     defer rt.destroy();
@@ -261,9 +262,9 @@ test "fsWrite + fsRead round trip via storage" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 5);
     defer rt.destroy();
@@ -290,9 +291,9 @@ test "log/note/warn emit events to logger without error" {
     defer tmp_st.cleanup();
 
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = try tmp_log.dir.realpath(".", &log_buf);
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
     var st_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const st_dir = try tmp_st.dir.realpath(".", &st_buf);
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
 
     const rt = try beam.Runtime.init(allocator, 6);
     defer rt.destroy();
