@@ -80,7 +80,7 @@ test "submit: task runs on worker thread" {
     const deadline = clock.nowMs() + 100;
     while (!done.load(.acquire)) {
         if (clock.nowMs() > deadline) break;
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        clock.sleepNs(1 * std.time.ns_per_ms);
     }
     try std.testing.expect(done.load(.acquire));
 }

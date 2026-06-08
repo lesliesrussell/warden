@@ -1,6 +1,7 @@
 // warden-39v
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const control = @import("control.zig");
 const types = @import("types.zig");
@@ -20,7 +21,7 @@ test "control server: beam.list returns beam_id and process_count" {
     defer cs.stop();
 
     // Give the server thread a moment to reach accept().
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -61,7 +62,7 @@ test "control server: unknown action returns ok=false" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -94,7 +95,7 @@ test "control server: proc.list returns all spawned processes" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -130,7 +131,7 @@ test "control server: proc.list with kind filter" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -171,7 +172,7 @@ test "control server: topology.get returns tree with parent-child relationships"
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -231,7 +232,7 @@ test "control server: logs.stream reads log file by pid" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -281,7 +282,7 @@ test "control server: logs.stream grep filter" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -316,7 +317,7 @@ test "control server: proc.control pause and resume" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     // Pause — new connection per request (server handles one frame per connection).
     {
@@ -386,7 +387,7 @@ test "control server: proc.control kill transitions to exiting" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -425,7 +426,7 @@ test "control server: proc.control quarantine sets activity_class to tiny" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -464,7 +465,7 @@ test "control server: proc.control promote sets activity_class and ttl" {
     try cs.start();
     defer cs.stop();
 
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     const stream = try std.net.connectUnixSocket(socket_path);
     defer stream.close();
@@ -541,7 +542,7 @@ test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
     var cs = try control.ControlServer.init(allocator, rt, socket_path);
     try cs.start();
     defer cs.stop();
-    std.Thread.sleep(5 * std.time.ns_per_ms);
+    clock.sleepNs(5 * std.time.ns_per_ms);
 
     // ── beam.create: existing beam returns its id ────────────────────────────
     {

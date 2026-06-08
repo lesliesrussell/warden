@@ -1,6 +1,7 @@
 // warden-1ud
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const supervisor_mod = @import("supervisor.zig");
 const types = @import("types.zig");
@@ -80,7 +81,7 @@ fn matchAny(msg: *const MessageEnvelope) bool {
 fn plannerThread(wctx: *WorkerCtx) void {
     // Spin until topology.start() has finished wiring up the Ctx and mailbox.
     while (!wctx.ready.load(.acquire)) {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        clock.sleepNs(1 * std.time.ns_per_ms);
     }
 
     const ctx = &wctx.ctx;
@@ -190,7 +191,7 @@ fn plannerThread(wctx: *WorkerCtx) void {
 /// task JSON to the external runtime and await its result before sending task_result.
 fn toolWorkerThread(wctx: *WorkerCtx) void {
     while (!wctx.ready.load(.acquire)) {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        clock.sleepNs(1 * std.time.ns_per_ms);
     }
 
     const ctx = &wctx.ctx;
@@ -210,7 +211,7 @@ fn toolWorkerThread(wctx: *WorkerCtx) void {
             ctx.note("tool_worker: executing task", null) catch {};
 
             // Simulate work.
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            clock.sleepNs(1 * std.time.ns_per_ms);
 
             const sender_proc = std.fmt.parseInt(u64, msg.from, 10) catch continue;
             const sender_pid = Pid{ .beam = topo.runtime.beam_id, .proc = sender_proc };
@@ -245,7 +246,7 @@ fn toolWorkerThread(wctx: *WorkerCtx) void {
 /// Simplified stub; real implementation would maintain an in-memory key/value map.
 fn memoryThread(wctx: *WorkerCtx) void {
     while (!wctx.ready.load(.acquire)) {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        clock.sleepNs(1 * std.time.ns_per_ms);
     }
 
     const ctx = &wctx.ctx;
@@ -267,7 +268,7 @@ fn memoryThread(wctx: *WorkerCtx) void {
 /// Receives routing requests; returns stub model name "gpt-stub".
 fn modelRouterThread(wctx: *WorkerCtx) void {
     while (!wctx.ready.load(.acquire)) {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        clock.sleepNs(1 * std.time.ns_per_ms);
     }
 
     const ctx = &wctx.ctx;
@@ -312,7 +313,7 @@ fn modelRouterThread(wctx: *WorkerCtx) void {
 /// Receives health_check messages, replies with health_ok.
 fn watchdogThread(wctx: *WorkerCtx) void {
     while (!wctx.ready.load(.acquire)) {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        clock.sleepNs(1 * std.time.ns_per_ms);
     }
 
     const ctx = &wctx.ctx;

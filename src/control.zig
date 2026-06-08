@@ -280,7 +280,7 @@ fn handleProcCall(
             defer allocator.free(resp);
             return writeFrame(stream, resp);
         }
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        clock.sleepNs(10 * std.time.ns_per_ms);
     }
     try sendErrResp(allocator, req_id, stream, "timeout");
 }
@@ -870,7 +870,7 @@ fn handleLogsStream(
     // Poll for new content.
     var pos = try file.getPos();
     while (!cs.stopping.load(.acquire)) {
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        clock.sleepNs(100 * std.time.ns_per_ms);
         const new_content = blk: {
             try file.seekTo(pos);
             break :blk file.readToEndAlloc(allocator, 1 * 1024 * 1024) catch break;

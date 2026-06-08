@@ -21,6 +21,7 @@
 //     pipeline health timeline queryable from logs alone.
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const supervisor_mod = @import("supervisor.zig");
 
@@ -69,7 +70,7 @@ fn matchAny(msg: *const MessageEnvelope) bool {
 // Extractor: pulls data from source. Checkpoints offset to proc-state so
 // a restart resumes from the last committed position, not from the beginning.
 fn extractorThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("extractor: ready", null) catch {};
@@ -91,7 +92,7 @@ fn extractorThread(wctx: *WorkerCtx) void {
         if (std.mem.eql(u8, msg.@"type", MsgType.extract_start)) {
             // TODO: replace with real data source read
             ctx.note("extractor: extracting batch", null) catch {};
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            clock.sleepNs(5 * std.time.ns_per_ms);
 
             // Write extracted batch to proc-temp for transformer to read
             ctx.fsWrite(.proc_temp, "batch.json", "[]") catch {};
@@ -123,7 +124,7 @@ fn extractorThread(wctx: *WorkerCtx) void {
 // Transformer: reads extracted batch from proc-temp, applies transforms,
 // writes output to proc-temp for loader. Checkpoints transform position.
 fn transformerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("transformer: ready", null) catch {};
@@ -144,7 +145,7 @@ fn transformerThread(wctx: *WorkerCtx) void {
 
         if (std.mem.eql(u8, msg.@"type", MsgType.extract_done)) {
             ctx.note("transformer: transforming batch", null) catch {};
-            std.Thread.sleep(3 * std.time.ns_per_ms);
+            clock.sleepNs(3 * std.time.ns_per_ms);
 
             // Read from proc-temp, write transformed output
             const data = ctx.fsRead(.proc_temp, "batch.json") catch continue;
@@ -179,7 +180,7 @@ fn transformerThread(wctx: *WorkerCtx) void {
 // Loader: reads transformed data and loads to destination.
 // Checkpoints rows_loaded so a restart doesn't re-load committed rows.
 fn loaderThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("loader: ready", null) catch {};
@@ -201,7 +202,7 @@ fn loaderThread(wctx: *WorkerCtx) void {
         if (std.mem.eql(u8, msg.@"type", MsgType.transform_done)) {
             ctx.note("loader: loading batch to destination", null) catch {};
             // TODO: replace with real destination write (DB, S3, etc.)
-            std.Thread.sleep(2 * std.time.ns_per_ms);
+            clock.sleepNs(2 * std.time.ns_per_ms);
 
             rows_loaded += topo.config.batch_size;
 
@@ -232,7 +233,7 @@ fn loaderThread(wctx: *WorkerCtx) void {
 // Progress proc: aggregates stage metrics and emits pipeline health to log.
 // Queryable from logs alone — no separate metrics store needed.
 fn progressThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     ctx.note("progress: ready", null) catch {};
 

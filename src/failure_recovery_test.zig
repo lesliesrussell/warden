@@ -1,6 +1,7 @@
 // warden-45x
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const fd = @import("topology_failure_demo.zig");
 
@@ -30,14 +31,14 @@ test "failure recovery: hung worker is replaced, session PID unchanged, task 2 c
     try demo.start();
 
     // Give worker_1 time to become ready.
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    clock.sleepNs(20 * std.time.ns_per_ms);
     const worker_1_pid = demo.current_worker_proc.load(.acquire);
 
     // Dispatch task_1 — worker_1 accepts it then hangs.
     try demo.dispatchTask("task-1");
 
     // Wait for watchdog to detect idle and restart (idle_timeout=100ms, plus margin).
-    std.Thread.sleep(250 * std.time.ns_per_ms);
+    clock.sleepNs(250 * std.time.ns_per_ms);
 
     // Supervisor has restarted at least once.
     try std.testing.expect(demo.restart_count.load(.acquire) >= 1);
@@ -48,7 +49,7 @@ test "failure recovery: hung worker is replaced, session PID unchanged, task 2 c
     for (0..50) |_| {
         worker_2_pid = demo.current_worker_proc.load(.acquire);
         if (worker_2_pid != 0) break;
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        clock.sleepNs(10 * std.time.ns_per_ms);
     }
 
     // New worker has a different PID.
@@ -60,7 +61,7 @@ test "failure recovery: hung worker is replaced, session PID unchanged, task 2 c
 
     // Dispatch task_2 — worker_2 completes it.
     try demo.dispatchTask("task-2");
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    clock.sleepNs(50 * std.time.ns_per_ms);
     try std.testing.expect(demo.task_completed.load(.acquire));
 
 }
@@ -89,14 +90,14 @@ test "failure recovery: worker completes both tasks when hang_after_first is fal
     // Manually spawn a non-hanging worker by patching hang_after_first.
     // We test this by starting, dispatching task-2 only (no hang scenario).
     try demo.start();
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    clock.sleepNs(20 * std.time.ns_per_ms);
 
     // Force-restart once to get a non-hanging worker.
     try demo.restartWorker();
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    clock.sleepNs(20 * std.time.ns_per_ms);
 
     try demo.dispatchTask("task-ok");
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    clock.sleepNs(50 * std.time.ns_per_ms);
 
     try std.testing.expect(demo.task_completed.load(.acquire));
     try std.testing.expectEqual(@as(u32, 1), demo.restart_count.load(.acquire));

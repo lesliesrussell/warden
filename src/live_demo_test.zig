@@ -16,6 +16,7 @@
 //   6. Resuming transitions back to "running".
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam_mod = @import("beam.zig");
 const bridge = @import("bridge.zig");
 const control = @import("control.zig");
@@ -194,7 +195,7 @@ test "live demo: topology and messaging" {
                 got_reply = true;
                 break;
             }
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            clock.sleepNs(10 * std.time.ns_per_ms);
         }
         try std.testing.expect(got_reply);
     }
@@ -238,7 +239,7 @@ test "live demo: topology and messaging" {
                 port_found = try std.fmt.parseInt(u16, url[colon_pos + 1 ..], 10);
                 break;
             }
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            clock.sleepNs(10 * std.time.ns_per_ms);
         }
         try std.testing.expect(port_found > 0);
 

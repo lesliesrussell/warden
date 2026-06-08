@@ -1,6 +1,7 @@
 // warden-7hi
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const ca = @import("topology_code_assistant.zig");
 const ra = @import("topology_research_agent.zig");
@@ -23,7 +24,7 @@ test "code assistant topology boots and shuts down cleanly" {
         .storage_base = log_path,
     });
     try topo.start();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    clock.sleepNs(10 * std.time.ns_per_ms);
     topo.shutdown();
 }
 
@@ -44,7 +45,7 @@ test "code assistant watchdog pauses planner on budget_exceeded" {
         .storage_base = log_path,
     });
     try topo.start();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    clock.sleepNs(10 * std.time.ns_per_ms);
 
     // Send budget_exceeded to watchdog
     const mb = rt.getMailbox(topo.watchdog_pid);
@@ -60,7 +61,7 @@ test "code assistant watchdog pauses planner on budget_exceeded" {
         _ = m.enqueue(msg) catch {};
     }
 
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    clock.sleepNs(20 * std.time.ns_per_ms);
 
     // Send budget_ok to resume
     if (mb) |m| {
@@ -75,7 +76,7 @@ test "code assistant watchdog pauses planner on budget_exceeded" {
         _ = m.enqueue(msg) catch {};
     }
 
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    clock.sleepNs(10 * std.time.ns_per_ms);
     topo.shutdown();
 }
 
@@ -96,7 +97,7 @@ test "research agent topology boots and shuts down cleanly" {
         .storage_base = log_path,
     });
     try topo.start();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    clock.sleepNs(10 * std.time.ns_per_ms);
     topo.deinit();
 }
 
@@ -118,7 +119,7 @@ test "research agent ranker fans out to all retrievers" {
         .storage_base = log_path,
     });
     try topo.start();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    clock.sleepNs(10 * std.time.ns_per_ms);
 
     // Send rank_request to ranker
     const mb = rt.getMailbox(topo.ranker_pid);
@@ -137,7 +138,7 @@ test "research agent ranker fans out to all retrievers" {
     }
 
     // Allow time for fan-out and collection
-    std.Thread.sleep(200 * std.time.ns_per_ms);
+    clock.sleepNs(200 * std.time.ns_per_ms);
     topo.deinit();
 }
 
@@ -158,7 +159,7 @@ test "ETL topology boots and shuts down cleanly" {
         .storage_base = log_path,
     });
     try topo.start();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    clock.sleepNs(10 * std.time.ns_per_ms);
     topo.deinit();
 }
 
@@ -180,13 +181,13 @@ test "ETL pipeline runs extract→transform→load and checkpoints progress" {
         .storage_base = log_path,
     });
     try topo.start();
-    std.Thread.sleep(10 * std.time.ns_per_ms);
+    clock.sleepNs(10 * std.time.ns_per_ms);
 
     // Kick off a pipeline run
     try topo.run("task-etl-01");
 
     // Allow extract→transform→load chain to complete
-    std.Thread.sleep(100 * std.time.ns_per_ms);
+    clock.sleepNs(100 * std.time.ns_per_ms);
 
     topo.deinit();
 }

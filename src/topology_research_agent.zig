@@ -70,7 +70,7 @@ fn matchAny(msg: *const MessageEnvelope) bool {
 // warden-7hi
 // Web retriever: HTTP search. Replace stub with real HTTP client.
 fn webRetrieverThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("web_retriever: ready", null) catch {};
@@ -83,7 +83,7 @@ fn webRetrieverThread(wctx: *WorkerCtx) void {
         if (std.mem.eql(u8, msg.@"type", MsgType.retrieve)) {
             // TODO(warden-foreign): real HTTP search via Python bridge worker
             ctx.note("web_retriever: searching", null) catch {};
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            clock.sleepNs(5 * std.time.ns_per_ms);
 
             const result = MessageEnvelope{
                 .kind = .response,
@@ -105,7 +105,7 @@ fn webRetrieverThread(wctx: *WorkerCtx) void {
 // warden-7hi
 // Vector retriever: embedding similarity search.
 fn vectorRetrieverThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("vector_retriever: ready", null) catch {};
@@ -118,7 +118,7 @@ fn vectorRetrieverThread(wctx: *WorkerCtx) void {
         if (std.mem.eql(u8, msg.@"type", MsgType.retrieve)) {
             // TODO(warden-foreign): real embedding search via Python bridge worker
             ctx.note("vector_retriever: searching", null) catch {};
-            std.Thread.sleep(3 * std.time.ns_per_ms);
+            clock.sleepNs(3 * std.time.ns_per_ms);
 
             const result = MessageEnvelope{
                 .kind = .response,
@@ -140,7 +140,7 @@ fn vectorRetrieverThread(wctx: *WorkerCtx) void {
 // warden-7hi
 // Doc retriever: document store lookup.
 fn docRetrieverThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("doc_retriever: ready", null) catch {};
@@ -153,7 +153,7 @@ fn docRetrieverThread(wctx: *WorkerCtx) void {
         if (std.mem.eql(u8, msg.@"type", MsgType.retrieve)) {
             // TODO(warden-foreign): real doc store via Python bridge worker
             ctx.note("doc_retriever: searching", null) catch {};
-            std.Thread.sleep(2 * std.time.ns_per_ms);
+            clock.sleepNs(2 * std.time.ns_per_ms);
 
             const result = MessageEnvelope{
                 .kind = .response,
@@ -177,7 +177,7 @@ fn docRetrieverThread(wctx: *WorkerCtx) void {
 // sends ranked list to synthesizer. Uses a timeout so slow retrievers
 // don't block the response — partial results are still useful.
 fn rankerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("ranker: ready", null) catch {};
@@ -240,7 +240,7 @@ fn rankerThread(wctx: *WorkerCtx) void {
 // warden-7hi
 // Synthesizer: receives ranked results, assembles final response.
 fn synthesizerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     ctx.note("synthesizer: ready", null) catch {};
 
@@ -260,7 +260,7 @@ fn synthesizerThread(wctx: *WorkerCtx) void {
 // Citation tracker: stores source provenance in proc-state.
 // Survives supervisor restarts — citation history is never lost.
 fn citationTrackerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     ctx.note("citation_tracker: ready", null) catch {};
     var cite_count: u32 = 0;

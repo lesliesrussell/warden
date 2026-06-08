@@ -82,7 +82,7 @@ pub fn main() !void {
 
     // Block until signal.
     while (!g_stopping.load(.acquire)) {
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        warden.clock.sleepNs(100 * std.time.ns_per_ms);
     }
 
     std.debug.print("warden: beam {d} shutting down\n", .{beam_id});

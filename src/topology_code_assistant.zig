@@ -22,6 +22,7 @@
 //     does not affect LSP or file ops.
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const supervisor_mod = @import("supervisor.zig");
 const types = @import("types.zig");
@@ -76,7 +77,7 @@ fn matchAny(msg: *const MessageEnvelope) bool {
 // Planner: receives user_request, decomposes into tool_call messages,
 // collects results, returns synthesized response.
 fn plannerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
 
@@ -137,7 +138,7 @@ fn plannerThread(wctx: *WorkerCtx) void {
 // Shell worker: receives tool_call, simulates shell execution, replies with result.
 // In production: wrap std.process.Child to run the command.
 fn shellWorkerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
 
@@ -152,7 +153,7 @@ fn shellWorkerThread(wctx: *WorkerCtx) void {
         {
             // TODO(warden-foreign): replace with real shell execution via std.process.Child
             ctx.note("shell_worker: executing command", null) catch {};
-            std.Thread.sleep(2 * std.time.ns_per_ms); // simulate work
+            clock.sleepNs(2 * std.time.ns_per_ms); // simulate work
 
             const result = beam.MessageEnvelope{
                 .kind = .response,
@@ -176,7 +177,7 @@ fn shellWorkerThread(wctx: *WorkerCtx) void {
 // warden-7hi
 // LSP worker: language server queries. Stub — replace with real LSP protocol.
 fn lspWorkerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     ctx.note("lsp_worker: ready", null) catch {};
     while (!wctx.stopping.load(.acquire)) {
@@ -191,7 +192,7 @@ fn lspWorkerThread(wctx: *WorkerCtx) void {
 // warden-7hi
 // File worker: read / write / patch files via proc-state namespace.
 fn fileWorkerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     ctx.note("file_worker: ready", null) catch {};
     while (!wctx.stopping.load(.acquire)) {
@@ -207,7 +208,7 @@ fn fileWorkerThread(wctx: *WorkerCtx) void {
 // Memory proc: manages context window. Stores entries in proc-state so
 // they survive supervisor restarts. Evicts oldest when approaching limit.
 fn memoryThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     ctx.note("memory: ready", null) catch {};
 
@@ -239,7 +240,7 @@ fn memoryThread(wctx: *WorkerCtx) void {
 // Watchdog: monitors token budget. Pauses planner when budget exceeded.
 // Resumes planner when budget_ok received (e.g. after user acks or context pruned).
 fn watchdogThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const topo = wctx.topology;
     ctx.note("watchdog: ready", null) catch {};

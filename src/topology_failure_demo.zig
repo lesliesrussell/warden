@@ -62,7 +62,7 @@ fn matchAny(msg: *const MessageEnvelope) bool {
 // If hang_after_first is true: handles first task then stops logging (simulates
 // a blocking HTTP call with no timeout). The watchdog detects the idle gap.
 fn toolWorkerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const demo = wctx.demo;
 
@@ -86,13 +86,13 @@ fn toolWorkerThread(wctx: *WorkerCtx) void {
                 // advancing, which the watchdog detects as idle_timeout.
                 ctx.note("tool_worker: calling external API (no timeout)...", null) catch {};
                 while (!wctx.stopping.load(.acquire)) {
-                    std.Thread.sleep(10 * std.time.ns_per_ms);
+                    clock.sleepNs(10 * std.time.ns_per_ms);
                 }
                 break;
             }
 
             // Normal path: complete the task and notify the demo.
-            std.Thread.sleep(3 * std.time.ns_per_ms);
+            clock.sleepNs(3 * std.time.ns_per_ms);
             ctx.note("tool_worker: task completed", null) catch {};
             demo.task_completed.store(true, .release);
         }
@@ -119,7 +119,7 @@ fn watchdogThread(wdctx: *WatchdogCtx) void {
     const poll_ns = demo.config.watchdog_poll_ms * std.time.ns_per_ms;
 
     while (!wdctx.stopping.load(.acquire)) {
-        std.Thread.sleep(poll_ns);
+        clock.sleepNs(poll_ns);
         // warden-iry: recheck after sleep — deinit() may have fired during sleep
         if (wdctx.stopping.load(.acquire)) break;
 

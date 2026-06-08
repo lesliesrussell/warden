@@ -45,7 +45,7 @@ test "Topology.init + start boots without panic" {
     try topo.start();
 
     // Brief pause so workers can reach ready state.
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    clock.sleepNs(20 * std.time.ns_per_ms);
 
     try topo.shutdown();
     topo.deinit();
@@ -79,7 +79,7 @@ test "planner -> tool_worker round trip: send run_task, verify task_result arriv
     try topo.start();
 
     // Allow workers to reach their main loops.
-    std.Thread.sleep(30 * std.time.ns_per_ms);
+    clock.sleepNs(30 * std.time.ns_per_ms);
 
     // Allocate a "caller" pid with a mailbox so the planner can reply to us.
     const caller_pid = try rt.registry.spawn(.native_worker, null, .{});
@@ -141,7 +141,7 @@ test "planner -> tool_worker round trip: send run_task, verify task_result arriv
             result_arrived = true;
             break;
         }
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        clock.sleepNs(5 * std.time.ns_per_ms);
     }
 
     try topo.shutdown();
@@ -177,7 +177,7 @@ test "watchdog responds to health_check with health_ok" {
     var topo = try Topology.init(allocator, rt, config);
     try topo.start();
 
-    std.Thread.sleep(30 * std.time.ns_per_ms);
+    clock.sleepNs(30 * std.time.ns_per_ms);
 
     // Allocate caller.
     const caller_pid = try rt.registry.spawn(.native_worker, null, .{});
@@ -229,7 +229,7 @@ test "watchdog responds to health_check with health_ok" {
             health_ok = true;
             break;
         }
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        clock.sleepNs(5 * std.time.ns_per_ms);
     }
 
     try topo.shutdown();
@@ -265,7 +265,7 @@ test "Topology.shutdown tears down cleanly (no hanging threads)" {
     var topo = try Topology.init(allocator, rt, config);
     try topo.start();
 
-    std.Thread.sleep(20 * std.time.ns_per_ms);
+    clock.sleepNs(20 * std.time.ns_per_ms);
 
     // shutdown + deinit must complete without hanging.
     try topo.shutdown();
@@ -300,7 +300,7 @@ test "trace_id and session_id appear in log output" {
     var topo = try Topology.init(allocator, rt, config);
     try topo.start();
 
-    std.Thread.sleep(30 * std.time.ns_per_ms);
+    clock.sleepNs(30 * std.time.ns_per_ms);
 
     // Send a run_task with trace_id and session_id set so they flow through logs.
     const caller_pid = try rt.registry.spawn(.native_worker, null, .{});
@@ -329,7 +329,7 @@ test "trace_id and session_id appear in log output" {
     rt.scheduler.notifyMessage(topo.planner_pid);
 
     // Wait for round-trip to complete.
-    std.Thread.sleep(500 * std.time.ns_per_ms);
+    clock.sleepNs(500 * std.time.ns_per_ms);
 
     try topo.shutdown();
     topo.deinit();

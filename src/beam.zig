@@ -272,7 +272,7 @@ pub const Ctx = struct {
             const reply_opt = scanMailboxCorr(mb, msg.id);
             if (reply_opt) |r| return r;
 
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            clock.sleepNs(1 * std.time.ns_per_ms);
         }
         return error.Timeout;
     }
@@ -312,7 +312,7 @@ pub const Ctx = struct {
                 return msg;
             }
 
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            clock.sleepNs(1 * std.time.ns_per_ms);
         }
     }
 

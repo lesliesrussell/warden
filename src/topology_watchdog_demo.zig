@@ -15,6 +15,7 @@
 //   tool_worker: note "resumed after pause"
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 
 pub const Pid = beam.Pid;
@@ -62,7 +63,7 @@ fn matchAny(msg: *const MessageEnvelope) bool {
 // The watchdog monitors its log sequence number and intervenes when it
 // exceeds the quota.
 fn toolWorkerThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     ctx.note("tool_worker: ready", null) catch {};
 
@@ -81,7 +82,7 @@ fn toolWorkerThread(wctx: *WorkerCtx) void {
             ctx.note("tool_worker: processing results", null) catch {};
             ctx.note("tool_worker: writing output", null) catch {};
             ctx.metric("task_duration_ms", @as(f64, @floatFromInt(task_num * 3)), null) catch {};
-            std.Thread.sleep(2 * std.time.ns_per_ms);
+            clock.sleepNs(2 * std.time.ns_per_ms);
             ctx.note("tool_worker: task complete", null) catch {};
         }
 
@@ -97,7 +98,7 @@ fn toolWorkerThread(wctx: *WorkerCtx) void {
 // Watchdog: polls the tool worker's log sequence number.
 // When seq > log_quota, it pauses the worker, waits cooldown_ms, resumes.
 fn watchdogThread(wctx: *WorkerCtx) void {
-    while (!wctx.ready.load(.acquire)) std.Thread.sleep(1 * std.time.ns_per_ms);
+    while (!wctx.ready.load(.acquire)) clock.sleepNs(1 * std.time.ns_per_ms);
     const ctx = &wctx.ctx;
     const demo = wctx.demo;
     const poll_ns = demo.config.poll_ms * std.time.ns_per_ms;
@@ -107,7 +108,7 @@ fn watchdogThread(wctx: *WorkerCtx) void {
     var already_intervened = false;
 
     while (!wctx.stopping.load(.acquire)) {
-        std.Thread.sleep(poll_ns);
+        clock.sleepNs(poll_ns);
 
         if (already_intervened) continue;
 
@@ -127,7 +128,7 @@ fn watchdogThread(wctx: *WorkerCtx) void {
         already_intervened = true;
 
         // Wait cooldown then resume.
-        std.Thread.sleep(demo.config.cooldown_ms * std.time.ns_per_ms);
+        clock.sleepNs(demo.config.cooldown_ms * std.time.ns_per_ms);
 
         ctx.note("watchdog: resuming tool_worker — cooldown elapsed", null) catch {};
         ctx.resume_(worker_pid) catch {};
