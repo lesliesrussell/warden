@@ -1,6 +1,7 @@
 // warden-dhx
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
@@ -139,7 +140,7 @@ pub const Supervisor = struct {
             .pid = child_pid,
             .state = .starting,
             .restart_count = 0,
-            .started_at_ms = std.time.milliTimestamp(),
+            .started_at_ms = clock.nowMs(),
         };
         try self.children.append(self.allocator, child);
 
@@ -256,7 +257,7 @@ pub const Supervisor = struct {
     // warden-dhx
     /// Prune old timestamps and check intensity. Records a restart if allowed.
     fn checkIntensityLocked(self: *Supervisor) !void {
-        const now = std.time.milliTimestamp();
+        const now = clock.nowMs();
         const window: i64 = @intCast(self.intensity_window_ms);
 
         // Compact: keep only timestamps within the window.
@@ -290,7 +291,7 @@ pub const Supervisor = struct {
         const new_pid = try self.registry.spawn(spec.kind, self.pid, PolicyEnvelope{});
         self.children.items[idx].pid = new_pid;
         self.children.items[idx].restart_count += 1;
-        self.children.items[idx].started_at_ms = std.time.milliTimestamp();
+        self.children.items[idx].started_at_ms = clock.nowMs();
         try self.submitChildLocked(idx);
     }
 

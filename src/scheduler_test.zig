@@ -1,6 +1,7 @@
 // warden-7a1
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
 const scheduler_mod = @import("scheduler.zig");
@@ -76,9 +77,9 @@ test "submit: task runs on worker thread" {
     try sched.submit(pid, entryFn, &ctx);
 
     // Poll with a 100ms deadline.
-    const deadline = std.time.milliTimestamp() + 100;
+    const deadline = clock.nowMs() + 100;
     while (!done.load(.acquire)) {
-        if (std.time.milliTimestamp() > deadline) break;
+        if (clock.nowMs() > deadline) break;
         std.Thread.sleep(1 * std.time.ns_per_ms);
     }
     try std.testing.expect(done.load(.acquire));
@@ -218,7 +219,7 @@ test "tick: expires timed-out waiter and moves to ready" {
         const entry = scheduler_mod.WaitEntry{
             .pid = pid,
             .timeout_ms = 0,
-            .enqueued_at_ms = std.time.milliTimestamp() - 1, // 1ms in the past
+            .enqueued_at_ms = clock.nowMs() - 1, // 1ms in the past
         };
         try sched.waiting.put(pid.proc, entry);
     }

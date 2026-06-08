@@ -1,6 +1,7 @@
 // warden-7q1
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
@@ -262,9 +263,9 @@ pub const Ctx = struct {
         try ctx.send(to, tagged_msg);
 
         // Spin-wait for a reply with matching corr.
-        const start_ms = @as(u64, @intCast(std.time.milliTimestamp()));
+        const start_ms = @as(u64, @intCast(clock.nowMs()));
         while (true) {
-            const elapsed_ms = @as(u64, @intCast(std.time.milliTimestamp())) -| start_ms;
+            const elapsed_ms = @as(u64, @intCast(clock.nowMs())) -| start_ms;
             if (elapsed_ms >= timeout_ms) break;
 
             const mb = ctx.runtime.getMailbox(ctx.pid) orelse return error.NoSuchProcess;
@@ -290,9 +291,9 @@ pub const Ctx = struct {
         match_fn: *const fn (msg: *const MessageEnvelope) bool,
         timeout_ms: u64,
     ) !?MessageEnvelope {
-        const start_ms = @as(u64, @intCast(std.time.milliTimestamp()));
+        const start_ms = @as(u64, @intCast(clock.nowMs()));
         while (true) {
-            const elapsed_ms = @as(u64, @intCast(std.time.milliTimestamp())) -| start_ms;
+            const elapsed_ms = @as(u64, @intCast(clock.nowMs())) -| start_ms;
             if (elapsed_ms >= timeout_ms) return null;
 
             const mb = ctx.runtime.getMailbox(ctx.pid) orelse return error.NoSuchProcess;

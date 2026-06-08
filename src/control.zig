@@ -7,6 +7,7 @@
 // Activation: call ControlServer.init() then .start().
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam_mod = @import("beam.zig");
 const bridge_mod = @import("bridge.zig");
 const registry_mod = @import("registry.zig");
@@ -285,7 +286,7 @@ fn handleProcCall(
 }
 
 fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []const u8, stream: std.net.Stream) !void {
-    const uptime_ms = std.time.milliTimestamp() - cs.started_at;
+    const uptime_ms = clock.nowMs() - cs.started_at;
 
     cs.runtime.registry.mutex.lock();
     const proc_count = cs.runtime.registry.map.count();
@@ -361,7 +362,7 @@ fn handleProcList(
     }
     cs.runtime.registry.mutex.unlock();
 
-    const now = std.time.milliTimestamp();
+    const now = clock.nowMs();
 
     // Build JSON response.
     var buf: std.ArrayList(u8) = .empty;
@@ -805,7 +806,7 @@ fn handleLogsStream(
     defer file.close();
 
     const cutoff_ts: f64 = if (since_ms > 0)
-        @as(f64, @floatFromInt(std.time.milliTimestamp() - @as(i64, @intCast(since_ms)))) / 1000.0
+        @as(f64, @floatFromInt(clock.nowMs() - @as(i64, @intCast(since_ms)))) / 1000.0
     else
         0.0;
 
@@ -947,7 +948,7 @@ pub const ControlServer = struct {
             .server = server,
             .thread = null,
             .stopping = std.atomic.Value(bool).init(false),
-            .started_at = std.time.milliTimestamp(),
+            .started_at = clock.nowMs(),
             .runtimes = runtimes,
             .supervisors = supervisors,
             .next_beam_id = std.atomic.Value(u32).init(runtime.beam_id + 1),

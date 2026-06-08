@@ -1,6 +1,7 @@
 // warden-3rc
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const sync = @import("sync.zig");
 const types = @import("types.zig");
 
@@ -66,7 +67,7 @@ pub const Registry = struct {
     ) !Pid {
         const proc_id = global_proc_counter.fetchAdd(1, .monotonic);
         const pid = Pid{ .beam = self.beam_id, .proc = proc_id };
-        const now = std.time.milliTimestamp();
+        const now = clock.nowMs();
         const entry = ProcessEntry{
             .pid = pid,
             .kind = kind,
@@ -100,7 +101,7 @@ pub const Registry = struct {
         const entry = self.map.getPtr(pid.proc) orelse return RegistryError.ProcessNotFound;
         if (!entry.state.canTransitionTo(next_state)) return RegistryError.InvalidTransition;
         entry.state = next_state;
-        entry.last_active_at = std.time.milliTimestamp();
+        entry.last_active_at = clock.nowMs();
     }
 
     /// Remove a dead process from the registry. Returns an error if the

@@ -17,6 +17,7 @@
 //   5. session_supervisor PID unchanged throughout
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const sync = @import("sync.zig");
 const beam = @import("beam.zig");
 
@@ -127,7 +128,7 @@ fn watchdogThread(wdctx: *WatchdogCtx) void {
 
         const pid = Pid{ .beam = demo.runtime.beam_id, .proc = worker_pid };
         const entry = demo.runtime.registry.lookup(pid) orelse continue;
-        const idle_ms = std.time.milliTimestamp() - entry.last_active_at;
+        const idle_ms = clock.nowMs() - entry.last_active_at;
 
         if (idle_ms > demo.config.idle_timeout_ms) {
             // Claim the restart slot — skip if a restart is already in flight.

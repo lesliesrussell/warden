@@ -1,6 +1,7 @@
 // warden-1ud
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const topology = @import("topology.zig");
 
@@ -116,10 +117,10 @@ test "planner -> tool_worker round trip: send run_task, verify task_result arriv
 
     const caller_mb = rt.getMailbox(caller_pid) orelse return error.NoCallerMailbox;
     const deadline_ms: u64 = 3000;
-    const start_ms = @as(u64, @intCast(std.time.milliTimestamp()));
+    const start_ms = @as(u64, @intCast(clock.nowMs()));
     var result_arrived = false;
     while (true) {
-        const elapsed = @as(u64, @intCast(std.time.milliTimestamp())) -| start_ms;
+        const elapsed = @as(u64, @intCast(clock.nowMs())) -| start_ms;
         if (elapsed >= deadline_ms) break;
 
         caller_mb.mu.lock();
@@ -204,10 +205,10 @@ test "watchdog responds to health_check with health_ok" {
     // Wait for health_ok.
     const caller_mb = rt.getMailbox(caller_pid) orelse return error.NoCallerMailbox;
     const deadline_ms: u64 = 2000;
-    const start_ms = @as(u64, @intCast(std.time.milliTimestamp()));
+    const start_ms = @as(u64, @intCast(clock.nowMs()));
     var health_ok = false;
     while (true) {
-        const elapsed = @as(u64, @intCast(std.time.milliTimestamp())) -| start_ms;
+        const elapsed = @as(u64, @intCast(clock.nowMs())) -| start_ms;
         if (elapsed >= deadline_ms) break;
 
         caller_mb.mu.lock();

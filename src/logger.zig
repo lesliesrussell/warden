@@ -1,6 +1,7 @@
 // warden-554
 
 const std = @import("std");
+const clock = @import("clock.zig");
 
 // warden-554
 /// All runtime-emitted event types and process-authored event types.
@@ -311,7 +312,7 @@ pub const ProcessLogger = struct {
     /// append; values are serialised according to their `std.json.Value` type.
     pub fn emit(self: *ProcessLogger, event: LogEvent, extra: ?std.json.ObjectMap) !void {
         self.seq += 1;
-        const ts = std.time.milliTimestamp();
+        const ts = clock.nowMs();
         const w = &self.file_writer.interface;
 
         // Mandatory fields

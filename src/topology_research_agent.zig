@@ -22,6 +22,7 @@
 //     it uses a timeout so a slow retriever does not block the response.
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const supervisor_mod = @import("supervisor.zig");
 
@@ -205,8 +206,8 @@ fn rankerThread(wctx: *WorkerCtx) void {
 
             // Collect up to 3 results with timeout
             var collected: u32 = 0;
-            const deadline = std.time.milliTimestamp() + @as(i64, @intCast(topo.config.retriever_timeout_ms));
-            while (collected < 3 and std.time.milliTimestamp() < deadline) {
+            const deadline = clock.nowMs() + @as(i64, @intCast(topo.config.retriever_timeout_ms));
+            while (collected < 3 and clock.nowMs() < deadline) {
                 const r_opt = ctx.recv(matchAny, 100) catch null;
                 if (r_opt) |r| {
                     if (std.mem.eql(u8, r.@"type", MsgType.retrieval_result)) {

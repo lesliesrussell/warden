@@ -1,6 +1,7 @@
 // warden-7a1
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
@@ -161,7 +162,7 @@ pub const Scheduler = struct {
         const entry = WaitEntry{
             .pid = pid,
             .timeout_ms = timeout_ms,
-            .enqueued_at_ms = std.time.milliTimestamp(),
+            .enqueued_at_ms = clock.nowMs(),
         };
         try self.waiting.put(pid.proc, entry);
         self.registry.transition(pid, .waiting) catch {};
@@ -219,7 +220,7 @@ pub const Scheduler = struct {
     /// Tick: expire timed-out waiters and auto-wake hibernating processes past resume time.
     /// Should be called periodically (e.g. by a timer thread or main loop).
     pub fn tick(self: *Scheduler) !void {
-        const now = std.time.milliTimestamp();
+        const now = clock.nowMs();
         self.mutex.lock();
         defer self.mutex.unlock();
 

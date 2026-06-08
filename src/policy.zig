@@ -1,6 +1,7 @@
 // warden-u8y
 
 const std = @import("std");
+const clock = @import("clock.zig");
 const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
@@ -84,7 +85,7 @@ pub const PolicyEngine = struct {
             .pid = pid,
             .action = action_copy,
             .reason = reason_copy,
-            .ts = std.time.milliTimestamp(),
+            .ts = clock.nowMs(),
         });
     }
 
@@ -109,7 +110,7 @@ pub const PolicyEngine = struct {
         const reason_copy = try self.allocator.dupe(u8, reason);
         errdefer self.allocator.free(reason_copy);
 
-        const expires_at = std.time.milliTimestamp() + @as(i64, @intCast(ttl_ms));
+        const expires_at = clock.nowMs() + @as(i64, @intCast(ttl_ms));
         const rec = PromotionRecord{
             .prior_class = prior_class,
             .promoted_class = class,
@@ -157,7 +158,7 @@ pub const PolicyEngine = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = clock.nowMs();
 
         // Collect expired keys — can't remove during iteration
         var expired_keys: [64]u64 = undefined;
