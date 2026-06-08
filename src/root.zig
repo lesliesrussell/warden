@@ -30,6 +30,8 @@ pub const topology_failure_demo = @import("topology_failure_demo.zig");
 pub const topology_watchdog_demo = @import("topology_watchdog_demo.zig");
 // warden-39v
 pub const control = @import("control.zig");
+// warden-d8p
+pub const sync = @import("sync.zig");
 
 comptime {
     _ = @import("types_test.zig");
@@ -62,4 +64,6 @@ comptime {
     _ = @import("control_test.zig");
     // warden-3cn
     _ = @import("live_demo_test.zig");
+    // warden-d8p
+    _ = @import("sync.zig");
 }

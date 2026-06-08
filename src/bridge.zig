@@ -1,6 +1,7 @@
 // warden-eet
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const beam_mod = @import("beam.zig");
 const types = @import("types.zig");
 
@@ -178,7 +179,7 @@ pub const ForeignBridge = struct {
     reader_thread: ?std.Thread,
     running: std.atomic.Value(bool),
     ctx: Ctx,
-    write_mutex: std.Thread.Mutex,
+    write_mutex: sync.Mutex,
     // warden-3cn: arena for reply message strings; freed on deinit
     msg_arena: std.heap.ArenaAllocator,
 

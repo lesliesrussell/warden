@@ -1,6 +1,7 @@
 // warden-dhx
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
 const scheduler_mod = @import("scheduler.zig");
@@ -80,7 +81,7 @@ pub const Supervisor = struct {
     scheduler: *Scheduler,
     /// Ordered list of children; insertion order matters for rest_for_one.
     children: std.ArrayList(Child),
-    mutex: std.Thread.Mutex,
+    mutex: sync.Mutex,
 
     /// Max restart intensity parameters.
     max_restarts: u32,

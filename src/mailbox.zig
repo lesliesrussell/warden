@@ -1,6 +1,7 @@
 // warden-6v5
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const types = @import("types.zig");
 
 const MessageEnvelope = types.MessageEnvelope;
@@ -34,7 +35,7 @@ pub const EnqueueResult = union(enum) {
 
 // warden-6v5
 pub const Mailbox = struct {
-    mu: std.Thread.Mutex,
+    mu: sync.Mutex,
     allocator: std.mem.Allocator,
     queue: std.ArrayList(MessageEnvelope),
     policy: PolicyEnvelope,

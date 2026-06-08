@@ -17,6 +17,7 @@
 //   5. session_supervisor PID unchanged throughout
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const beam = @import("beam.zig");
 
 pub const Pid = beam.Pid;
@@ -165,7 +166,7 @@ pub const FailureRecoveryDemo = struct {
 
     worker: ?*WorkerCtx,
     watchdog: WatchdogCtx,
-    worker_mutex: std.Thread.Mutex,
+    worker_mutex: sync.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, runtime: *Runtime, config: Config) !FailureRecoveryDemo {
         const session_pid = try runtime.registry.spawn(.native_worker, null, .{});

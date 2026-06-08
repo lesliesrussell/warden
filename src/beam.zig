@@ -1,6 +1,7 @@
 // warden-7q1
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
 const mailbox_mod = @import("mailbox.zig");
@@ -87,7 +88,7 @@ pub const Runtime = struct {
     policy: PolicyEngine,
     /// Per-process mailboxes, keyed by pid.proc.
     mailboxes: std.AutoHashMap(u64, *Mailbox),
-    mailboxes_mutex: std.Thread.Mutex,
+    mailboxes_mutex: sync.Mutex,
 
     // warden-7q1
     /// Allocate a Runtime on the heap. Returns an owned pointer.

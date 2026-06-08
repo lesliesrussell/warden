@@ -1,6 +1,7 @@
 // warden-3rc
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const types = @import("types.zig");
 
 const Pid = types.Pid;
@@ -40,7 +41,7 @@ pub const RegistryError = error{
 pub const Registry = struct {
     allocator: std.mem.Allocator,
     beam_id: u32,
-    mutex: std.Thread.Mutex,
+    mutex: sync.Mutex,
     map: std.AutoHashMap(u64, ProcessEntry),
 
     pub fn init(allocator: std.mem.Allocator, beam_id: u32) Registry {

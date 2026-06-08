@@ -1,6 +1,7 @@
 // warden-7a1
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
 
@@ -70,10 +71,10 @@ pub const Scheduler = struct {
     paused: std.AutoHashMap(u64, void),
 
     // Mutex protects all queue/map fields above.
-    mutex: std.Thread.Mutex,
+    mutex: sync.Mutex,
 
     // Condition variable signals worker threads when task_queue has work.
-    cond: std.Thread.Condition,
+    cond: sync.Condition,
 
     // Worker thread pool.
     workers: []std.Thread,

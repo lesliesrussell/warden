@@ -1,6 +1,7 @@
 // warden-u8y
 
 const std = @import("std");
+const sync = @import("sync.zig");
 const types = @import("types.zig");
 const registry_mod = @import("registry.zig");
 
@@ -41,7 +42,7 @@ pub const PolicyEngine = struct {
     registry: *Registry,
     allocator: std.mem.Allocator,
     promotions: std.AutoHashMap(u64, PromotionRecord),
-    mutex: std.Thread.Mutex,
+    mutex: sync.Mutex,
     events: std.ArrayList(PolicyEvent),
 
     // warden-u8y
