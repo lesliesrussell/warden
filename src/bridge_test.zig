@@ -15,16 +15,16 @@ test "frame round trip" {
     var sv: [2]std.c.fd_t = undefined;
     const rc = std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sv);
     try std.testing.expect(rc == 0);
-    const sender = std.net.Stream{ .handle = sv[0] };
-    const receiver = std.net.Stream{ .handle = sv[1] };
-    defer sender.close();
-    defer receiver.close();
+    const sender = std.Io.net.Stream{ .socket = .{ .handle = sv[0], .address = undefined } };
+    const receiver = std.Io.net.Stream{ .socket = .{ .handle = sv[1], .address = undefined } };
+    defer sender.close(std.testing.io);
+    defer receiver.close(std.testing.io);
 
     const payload = "{\"kind\":\"ok\",\"hello\":\"world\"}";
-    try bridge.writeFrameTest(sender, payload);
+    try bridge.writeFrameTest(std.testing.io, sender, payload);
 
     const allocator = std.testing.allocator;
-    const received = try bridge.readFrameTest(allocator, receiver);
+    const received = try bridge.readFrameTest(std.testing.io, allocator, receiver);
     defer allocator.free(received);
 
     try std.testing.expectEqualStrings(payload, received);

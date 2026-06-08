@@ -22,3 +22,9 @@ fn processEnviron() std.process.Environ {
 pub fn get(name: []const u8) ?[:0]const u8 {
     return processEnviron().getPosix(name);
 }
+
+/// Build a mutable copy of the current process environment — replaces the
+/// removed std.process.getEnvMap. Caller owns the returned Map (deinit it).
+pub fn createMap(allocator: std.mem.Allocator) !std.process.Environ.Map {
+    return processEnviron().createMap(allocator);
+}

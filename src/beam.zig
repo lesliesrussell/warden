@@ -192,7 +192,7 @@ pub const Ctx = struct {
         storage_base: []const u8,
     ) !Ctx {
         // Open (or create) the log directory. warden-lmm: fs via std.Io.
-        try std.Io.Dir.cwd().createDirPath(runtime.io, log_dir);
+        std.Io.Dir.cwd().createDirPath(runtime.io, log_dir) catch {};
         const dir = try std.Io.Dir.cwd().openDir(runtime.io, log_dir, .{});
 
         // ProcessLogger must not be moved after init (file_writer holds &self.buf).

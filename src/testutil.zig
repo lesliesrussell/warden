@@ -24,3 +24,9 @@ pub fn tmpAbsAlloc(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8
     const n = try std.process.currentPath(std.testing.io, &cwd_buf);
     return std.fmt.allocPrint(allocator, "{s}/.zig-cache/tmp/{s}", .{ cwd_buf[0..n], &tmp.sub_path });
 }
+
+/// Connect to a Unix socket — replaces the removed std.net.connectUnixSocket.
+pub fn connectUnix(path: []const u8) !std.Io.net.Stream {
+    var ua = try std.Io.net.UnixAddress.init(path);
+    return ua.connect(std.testing.io);
+}

@@ -45,22 +45,23 @@ pub fn main() !void {
         };
     };
 
-    // Ensure parent directory exists.
+    // Start runtime (owns the std.Io executor used for the dir creation below).
+    const rt = try warden.beam.Runtime.init(allocator, beam_id);
+    defer rt.destroy();
+
+    // Ensure parent directory exists. warden-lmm: fs via std.Io (createDirPath
+    // is not idempotent — swallow PathAlreadyExists).
     if (std.fs.path.dirname(socket_path)) |parent| {
         const warden_dir = std.fs.path.dirname(parent) orelse parent;
-        std.fs.makeDirAbsolute(warden_dir) catch |e| if (e != error.PathAlreadyExists) {
+        std.Io.Dir.cwd().createDirPath(rt.io, warden_dir) catch |e| if (e != error.PathAlreadyExists) {
             std.debug.print("error: cannot create {s}: {}\n", .{ warden_dir, e });
             std.process.exit(1);
         };
-        std.fs.makeDirAbsolute(parent) catch |e| if (e != error.PathAlreadyExists) {
+        std.Io.Dir.cwd().createDirPath(rt.io, parent) catch |e| if (e != error.PathAlreadyExists) {
             std.debug.print("error: cannot create {s}: {}\n", .{ parent, e });
             std.process.exit(1);
         };
     }
-
-    // Start runtime.
-    const rt = try warden.beam.Runtime.init(allocator, beam_id);
-    defer rt.destroy();
 
     // Start control server.
     var cs = try warden.control.ControlServer.init(allocator, rt, socket_path);

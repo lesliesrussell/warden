@@ -42,7 +42,9 @@ fn pidStr(allocator: std.mem.Allocator, pid: Pid) ![]u8 {
 }
 
 fn msgId(allocator: std.mem.Allocator) ![]u8 {
-    const n = std.crypto.random.int(u32);
+    var rb: [4]u8 = undefined;
+    std.Io.random(std.testing.io, &rb);
+    const n = std.mem.readInt(u32, &rb, .little);
     return std.fmt.allocPrint(allocator, "t{x}", .{n});
 }
 
@@ -106,20 +108,13 @@ test "live demo: topology and messaging" {
 
     // ── 1. verify both workers appear in proc.list ────────────────────────────
     {
-        const stream = try std.net.connectUnixSocket(ctrl_sock);
-        defer stream.close();
+        const stream = try testutil.connectUnix(ctrl_sock);
+        defer stream.close(std.testing.io);
         const req = "{\"req_id\":\"t1\",\"action\":\"proc.list\",\"payload\":{\"beam\":43}}";
-        var hdr: [4]u8 = undefined;
-        std.mem.writeInt(u32, &hdr, @intCast(req.len), .big);
-        try stream.writeAll(&hdr);
-        try stream.writeAll(req);
+        try control.writeFrame(std.testing.io, stream, req);
 
-        var rhdr: [4]u8 = undefined;
-        _ = try stream.readAtLeast(&rhdr, 4);
-        const rlen = std.mem.readInt(u32, &rhdr, .big);
-        const rbuf = try allocator.alloc(u8, rlen);
+        const rbuf = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(rbuf);
-        _ = try stream.readAtLeast(rbuf, rlen);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rbuf, .{});
         defer parsed.deinit();
@@ -129,20 +124,13 @@ test "live demo: topology and messaging" {
 
     // ── 2. verify topology shows math_worker and web_server as children ───────
     {
-        const stream = try std.net.connectUnixSocket(ctrl_sock);
-        defer stream.close();
+        const stream = try testutil.connectUnix(ctrl_sock);
+        defer stream.close(std.testing.io);
         const req = "{\"req_id\":\"t2\",\"action\":\"topology.get\",\"payload\":{\"beam\":43}}";
-        var hdr: [4]u8 = undefined;
-        std.mem.writeInt(u32, &hdr, @intCast(req.len), .big);
-        try stream.writeAll(&hdr);
-        try stream.writeAll(req);
+        try control.writeFrame(std.testing.io, stream, req);
 
-        var rhdr: [4]u8 = undefined;
-        _ = try stream.readAtLeast(&rhdr, 4);
-        const rlen = std.mem.readInt(u32, &rhdr, .big);
-        const rbuf = try allocator.alloc(u8, rlen);
+        const rbuf = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(rbuf);
-        _ = try stream.readAtLeast(rbuf, rlen);
 
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rbuf, .{});
         defer parsed.deinit();
@@ -245,19 +233,17 @@ test "live demo: topology and messaging" {
         try std.testing.expect(port_found > 0);
 
         // Make HTTP GET /status — read until EOF (HTTP/1.0 closes after response)
-        const addr = try std.net.Address.parseIp4("127.0.0.1", port_found);
-        const sock = try std.net.tcpConnectToAddress(addr);
-        defer sock.close();
-        try sock.writeAll("GET /status HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
-        var resp_buf: std.ArrayList(u8) = .empty;
-        defer resp_buf.deinit(allocator);
-        var chunk: [512]u8 = undefined;
-        while (true) {
-            const nr = try sock.read(&chunk);
-            if (nr == 0) break;
-            try resp_buf.appendSlice(allocator, chunk[0..nr]);
-        }
-        const resp = resp_buf.items;
+        const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port_found);
+        const sock = try addr.connect(std.testing.io, .{ .mode = .stream });
+        defer sock.close(std.testing.io);
+        var wbuf: [256]u8 = undefined;
+        var sw = sock.writer(std.testing.io, &wbuf);
+        try sw.interface.writeAll("GET /status HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n");
+        try sw.interface.flush();
+        var rbuf: [512]u8 = undefined;
+        var sr = sock.reader(std.testing.io, &rbuf);
+        const resp = try sr.interface.allocRemaining(allocator, .unlimited);
+        defer allocator.free(resp);
         try std.testing.expect(std.mem.indexOf(u8, resp, "200") != null);
         try std.testing.expect(std.mem.indexOf(u8, resp, "\"status\"") != null);
     }
@@ -269,24 +255,17 @@ test "live demo: topology and messaging" {
 
         // Pause via ControlServer RPC
         {
-            const stream = try std.net.connectUnixSocket(ctrl_sock);
-            defer stream.close();
+            const stream = try testutil.connectUnix(ctrl_sock);
+            defer stream.close(std.testing.io);
             const req_body = try std.fmt.allocPrint(
                 allocator,
                 "{{\"req_id\":\"t3\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"{s}\",\"op\":\"pause\"}}}}",
                 .{math_str},
             );
             defer allocator.free(req_body);
-            var hdr: [4]u8 = undefined;
-            std.mem.writeInt(u32, &hdr, @intCast(req_body.len), .big);
-            try stream.writeAll(&hdr);
-            try stream.writeAll(req_body);
-            var rhdr: [4]u8 = undefined;
-            _ = try stream.readAtLeast(&rhdr, 4);
-            const rlen = std.mem.readInt(u32, &rhdr, .big);
-            const rbuf = try allocator.alloc(u8, rlen);
+            try control.writeFrame(std.testing.io, stream, req_body);
+            const rbuf = try control.readFrame(std.testing.io, allocator, stream);
             defer allocator.free(rbuf);
-            _ = try stream.readAtLeast(rbuf, rlen);
         }
 
         // Verify paused state
@@ -297,24 +276,17 @@ test "live demo: topology and messaging" {
 
         // Resume
         {
-            const stream = try std.net.connectUnixSocket(ctrl_sock);
-            defer stream.close();
+            const stream = try testutil.connectUnix(ctrl_sock);
+            defer stream.close(std.testing.io);
             const req_body = try std.fmt.allocPrint(
                 allocator,
                 "{{\"req_id\":\"t4\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"{s}\",\"op\":\"resume\"}}}}",
                 .{math_str},
             );
             defer allocator.free(req_body);
-            var hdr: [4]u8 = undefined;
-            std.mem.writeInt(u32, &hdr, @intCast(req_body.len), .big);
-            try stream.writeAll(&hdr);
-            try stream.writeAll(req_body);
-            var rhdr: [4]u8 = undefined;
-            _ = try stream.readAtLeast(&rhdr, 4);
-            const rlen = std.mem.readInt(u32, &rhdr, .big);
-            const rbuf = try allocator.alloc(u8, rlen);
+            try control.writeFrame(std.testing.io, stream, req_body);
+            const rbuf = try control.readFrame(std.testing.io, allocator, stream);
             defer allocator.free(rbuf);
-            _ = try stream.readAtLeast(rbuf, rlen);
         }
 
         // Verify resumed

@@ -25,13 +25,13 @@ test "control server: beam.list returns beam_id and process_count" {
     // Give the server thread a moment to reach accept().
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = "{\"req_id\":\"t1\",\"action\":\"beam.list\",\"payload\":{}}";
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -66,13 +66,13 @@ test "control server: unknown action returns ok=false" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = "{\"req_id\":\"t2\",\"action\":\"no.such.action\",\"payload\":{}}";
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -99,13 +99,13 @@ test "control server: proc.list returns all spawned processes" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = "{\"req_id\":\"p1\",\"action\":\"proc.list\",\"payload\":{}}";
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -135,13 +135,13 @@ test "control server: proc.list with kind filter" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = "{\"req_id\":\"p2\",\"action\":\"proc.list\",\"payload\":{\"kind\":\"native_worker\"}}";
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -176,13 +176,13 @@ test "control server: topology.get returns tree with parent-child relationships"
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = "{\"req_id\":\"topo1\",\"action\":\"topology.get\",\"payload\":{}}";
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -236,13 +236,13 @@ test "control server: logs.stream reads log file by pid" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = "{\"req_id\":\"lg1\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"33/7\"}}";
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -286,13 +286,13 @@ test "control server: logs.stream grep filter" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = "{\"req_id\":\"lg2\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"34/8\",\"grep\":\"tool_call\"}}";
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -323,8 +323,8 @@ test "control server: proc.control pause and resume" {
 
     // Pause — new connection per request (server handles one frame per connection).
     {
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
 
         const pause_req = try std.fmt.allocPrint(
             allocator,
@@ -332,9 +332,9 @@ test "control server: proc.control pause and resume" {
             .{pid.proc},
         );
         defer allocator.free(pause_req);
-        try control.writeFrame(stream, pause_req);
+        try control.writeFrame(std.testing.io, stream, pause_req);
 
-        const pause_resp = try control.readFrame(allocator, stream);
+        const pause_resp = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(pause_resp);
 
         const p_parsed = try std.json.parseFromSlice(std.json.Value, allocator, pause_resp, .{});
@@ -349,8 +349,8 @@ test "control server: proc.control pause and resume" {
 
     // Resume — new connection.
     {
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
 
         const resume_req = try std.fmt.allocPrint(
             allocator,
@@ -358,9 +358,9 @@ test "control server: proc.control pause and resume" {
             .{pid.proc},
         );
         defer allocator.free(resume_req);
-        try control.writeFrame(stream, resume_req);
+        try control.writeFrame(std.testing.io, stream, resume_req);
 
-        const resume_resp = try control.readFrame(allocator, stream);
+        const resume_resp = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(resume_resp);
 
         const r_parsed = try std.json.parseFromSlice(std.json.Value, allocator, resume_resp, .{});
@@ -391,8 +391,8 @@ test "control server: proc.control kill transitions to exiting" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = try std.fmt.allocPrint(
         allocator,
@@ -400,9 +400,9 @@ test "control server: proc.control kill transitions to exiting" {
         .{pid.proc},
     );
     defer allocator.free(req);
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -430,8 +430,8 @@ test "control server: proc.control quarantine sets activity_class to tiny" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = try std.fmt.allocPrint(
         allocator,
@@ -439,9 +439,9 @@ test "control server: proc.control quarantine sets activity_class to tiny" {
         .{pid.proc},
     );
     defer allocator.free(req);
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -469,8 +469,8 @@ test "control server: proc.control promote sets activity_class and ttl" {
 
     clock.sleepNs(5 * std.time.ns_per_ms);
 
-    const stream = try std.net.connectUnixSocket(socket_path);
-    defer stream.close();
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
 
     const req = try std.fmt.allocPrint(
         allocator,
@@ -478,9 +478,9 @@ test "control server: proc.control promote sets activity_class and ttl" {
         .{pid.proc},
     );
     defer allocator.free(req);
-    try control.writeFrame(stream, req);
+    try control.writeFrame(std.testing.io, stream, req);
 
-    const resp_bytes = try control.readFrame(allocator, stream);
+    const resp_bytes = try control.readFrame(std.testing.io, allocator, stream);
     defer allocator.free(resp_bytes);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp_bytes, .{});
@@ -526,7 +526,7 @@ test "control server: sidecar written on start, removed on stop" {
     cs.stop();
 
     // Sidecar should be removed after stop.
-    const missing = std.fs.accessAbsolute(sidecar_path, .{});
+    const missing = std.Io.Dir.accessAbsolute(std.testing.io, sidecar_path, .{});
     try std.testing.expectError(error.FileNotFound, missing);
 }
 
@@ -546,10 +546,10 @@ test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
 
     // ── beam.create: existing beam returns its id ────────────────────────────
     {
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
-        try control.writeFrame(stream, "{\"req_id\":\"m1\",\"action\":\"beam.create\",\"payload\":{\"beam\":50}}");
-        const resp = try control.readFrame(allocator, stream);
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"m1\",\"action\":\"beam.create\",\"payload\":{\"beam\":50}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(resp);
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
         defer parsed.deinit();
@@ -559,10 +559,10 @@ test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
 
     // ── beam.create: allocates a new beam ───────────────────────────────────
     {
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
-        try control.writeFrame(stream, "{\"req_id\":\"m2\",\"action\":\"beam.create\",\"payload\":{\"beam\":51}}");
-        const resp = try control.readFrame(allocator, stream);
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"m2\",\"action\":\"beam.create\",\"payload\":{\"beam\":51}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(resp);
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
         defer parsed.deinit();
@@ -574,15 +574,15 @@ test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
     const math_script = "examples/live_demo/math_worker.py";
     var spawned_pid_str: []u8 = undefined;
     {
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
         const req = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"m3\",\"action\":\"proc.spawn\"," ++
             "\"payload\":{{\"beam\":50,\"cmd\":[\"python3\",\"{s}\"]}}}}",
             .{math_script});
         defer allocator.free(req);
-        try control.writeFrame(stream, req);
-        const resp = try control.readFrame(allocator, stream);
+        try control.writeFrame(std.testing.io, stream, req);
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(resp);
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
         defer parsed.deinit();
@@ -594,15 +594,15 @@ test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
 
     // ── proc.call: req.fib(10) → body 55 ────────────────────────────────────
     {
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
         const req = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"m4\",\"action\":\"proc.call\"," ++
             "\"payload\":{{\"pid\":\"{s}\",\"type\":\"req.fib\",\"body\":10,\"timeout_ms\":3000}}}}",
             .{spawned_pid_str});
         defer allocator.free(req);
-        try control.writeFrame(stream, req);
-        const resp = try control.readFrame(allocator, stream);
+        try control.writeFrame(std.testing.io, stream, req);
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(resp);
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
         defer parsed.deinit();
@@ -613,15 +613,15 @@ test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
 
     // ── proc.send: fire and forget, returns ok ───────────────────────────────
     {
-        const stream = try std.net.connectUnixSocket(socket_path);
-        defer stream.close();
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
         const req = try std.fmt.allocPrint(allocator,
             "{{\"req_id\":\"m5\",\"action\":\"proc.send\"," ++
             "\"payload\":{{\"pid\":\"{s}\",\"type\":\"req.fib\",\"body\":5}}}}",
             .{spawned_pid_str});
         defer allocator.free(req);
-        try control.writeFrame(stream, req);
-        const resp = try control.readFrame(allocator, stream);
+        try control.writeFrame(std.testing.io, stream, req);
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
         defer allocator.free(resp);
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
         defer parsed.deinit();

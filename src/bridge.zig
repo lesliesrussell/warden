@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const sync = @import("sync.zig");
+const env = @import("env.zig");
 const beam_mod = @import("beam.zig");
 const types = @import("types.zig");
 
@@ -16,35 +17,41 @@ const Namespace = beam_mod.Namespace;
 // warden-eet
 /// Write a length-prefixed JSON frame to a stream.
 /// Format: 4-byte big-endian u32 length + UTF-8 JSON payload.
-pub fn writeFrameTest(stream: std.net.Stream, json: []const u8) !void {
-    return writeFrame(stream, json);
+pub fn writeFrameTest(io: std.Io, stream: std.Io.net.Stream, json: []const u8) !void {
+    return writeFrame(io, stream, json);
 }
 
 /// Read a length-prefixed JSON frame from a stream (exported for tests).
-pub fn readFrameTest(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
-    return readFrame(allocator, stream);
+pub fn readFrameTest(io: std.Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream) ![]u8 {
+    var rbuf: [4096]u8 = undefined;
+    var reader = stream.reader(io, &rbuf);
+    return readFrame(allocator, &reader.interface);
 }
 
-fn writeFrame(stream: std.net.Stream, json: []const u8) !void {
+// warden-3qh: Zig 0.16 — std.Io.net.Stream has no writeAll/readAtLeast; frame I/O
+// goes through buffered Stream.Writer/Reader.
+fn writeFrame(io: std.Io, stream: std.Io.net.Stream, json: []const u8) !void {
     var hdr: [4]u8 = undefined;
     std.mem.writeInt(u32, &hdr, @intCast(json.len), .big);
-    try stream.writeAll(&hdr);
-    try stream.writeAll(json);
+    var wbuf: [4096]u8 = undefined;
+    var w = stream.writer(io, &wbuf);
+    try w.interface.writeAll(&hdr);
+    try w.interface.writeAll(json);
+    try w.interface.flush();
 }
 
 // warden-eet
-/// Read a length-prefixed JSON frame from a stream.
-/// Caller owns the returned slice.
-fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
+/// Read a length-prefixed JSON frame from a persistent reader.
+/// Caller owns the returned slice. The reader must persist across frames so
+/// bytes already pulled off the socket into its buffer are not lost.
+fn readFrame(allocator: std.mem.Allocator, r: *std.Io.Reader) ![]u8 {
     var hdr: [4]u8 = undefined;
-    const n = try stream.readAtLeast(&hdr, 4);
-    if (n < 4) return error.ConnectionClosed;
+    r.readSliceAll(&hdr) catch return error.ConnectionClosed;
     const length = std.mem.readInt(u32, &hdr, .big);
     if (length == 0) return error.EmptyFrame;
     const buf = try allocator.alloc(u8, length);
     errdefer allocator.free(buf);
-    const read = try stream.readAtLeast(buf, length);
-    if (read < length) return error.ConnectionClosed;
+    r.readSliceAll(buf) catch return error.ConnectionClosed;
     return buf;
 }
 
@@ -58,16 +65,16 @@ fn parseNamespace(ns_str: []const u8) !Namespace {
 
 // warden-eet
 /// Send a simple {"kind":"ok"} response.
-fn sendOk(stream: std.net.Stream) !void {
-    try writeFrame(stream, "{\"kind\":\"ok\"}");
+fn sendOk(io: std.Io, stream: std.Io.net.Stream) !void {
+    try writeFrame(io, stream, "{\"kind\":\"ok\"}");
 }
 
 // warden-eet
 /// Send a {"kind":"error","message":"..."} response.
-fn sendError(stream: std.net.Stream, allocator: std.mem.Allocator, message: []const u8) !void {
+fn sendError(io: std.Io, stream: std.Io.net.Stream, allocator: std.mem.Allocator, message: []const u8) !void {
     const json = try std.fmt.allocPrint(allocator, "{{\"kind\":\"error\",\"message\":\"{s}\"}}", .{message});
     defer allocator.free(json);
-    try writeFrame(stream, json);
+    try writeFrame(io, stream, json);
 }
 
 // warden-3cn: serialize a std.json.Value to an anytype writer (std.json.stringify unavailable in 0.15)
@@ -130,10 +137,14 @@ fn readerThread(rc: ReaderCtx) void {
     const self = rc.bridge;
     const allocator = self.allocator;
 
-    while (self.running.load(.acquire)) {
-        const conn = self.conn orelse break;
+    // warden-3qh: one persistent reader for the connection's lifetime — a fresh
+    // reader per frame would drop bytes already buffered off the socket.
+    const conn = self.conn orelse return;
+    var rbuf: [4096]u8 = undefined;
+    var reader = conn.reader(self.runtime.io, &rbuf);
 
-        const frame = readFrame(allocator, conn) catch {
+    while (self.running.load(.acquire)) {
+        const frame = readFrame(allocator, &reader.interface) catch {
             // EOF or connection closed — exit loop.
             break;
         };
@@ -173,9 +184,9 @@ pub const ForeignBridge = struct {
     runtime: *Runtime,
     pid: Pid,
     socket_path: []const u8, // owned
-    server: std.net.Server,
+    server: std.Io.net.Server,
     child_proc: ?std.process.Child,
-    conn: ?std.net.Stream,
+    conn: ?std.Io.net.Stream,
     reader_thread: ?std.Thread,
     running: std.atomic.Value(bool),
     ctx: Ctx,
@@ -220,9 +231,9 @@ pub const ForeignBridge = struct {
 
         // Bind Unix socket.
         // Delete any stale socket file first.
-        std.fs.cwd().deleteFile(socket_path) catch {};
-        const addr = try std.net.Address.initUnix(socket_path);
-        const server = try addr.listen(.{});
+        std.Io.Dir.cwd().deleteFile(runtime.io, socket_path) catch {};
+        const addr = try std.Io.net.UnixAddress.init(socket_path);
+        const server = try addr.listen(runtime.io, .{});
 
         // Build Ctx for the bridge to use when dispatching API calls.
         const ctx = try Ctx.init(runtime, pid, log_dir, storage_base);
@@ -245,15 +256,13 @@ pub const ForeignBridge = struct {
 
     // warden-eet
     pub fn deinit(self: *ForeignBridge) void {
-        // Close connection if still open.
-        if (self.conn) |c| {
-            c.close();
-            self.conn = null;
-        }
+        // warden-3qh: stop() shuts down + joins the reader thread before closing
+        // the fd — avoids a use-after-close (BADF) panic in the reader.
+        self.stop() catch {};
         // Close server.
-        self.server.deinit();
+        self.server.deinit(self.runtime.io);
         // Remove socket file.
-        std.fs.cwd().deleteFile(self.socket_path) catch {};
+        std.Io.Dir.cwd().deleteFile(self.runtime.io, self.socket_path) catch {};
         // Free socket path.
         self.allocator.free(self.socket_path);
         // Deinit ctx.
@@ -266,21 +275,22 @@ pub const ForeignBridge = struct {
     /// Spawn the child process, wait for it to connect, send the handshake,
     /// then start the reader thread.
     pub fn start(self: *ForeignBridge, cmd: []const []const u8) !void {
-        // Build env map = current env + WARDEN_SOCKET.
-        var env_map = try std.process.getEnvMap(self.allocator);
+        // warden-3qh: Zig 0.16 — build child env (current + WARDEN_SOCKET) and
+        // spawn via std.process.spawn(io, options).
+        var env_map = try env.createMap(self.allocator);
         defer env_map.deinit();
         try env_map.put("WARDEN_SOCKET", self.socket_path);
 
-        // Spawn child.
-        var child = std.process.Child.init(cmd, self.allocator);
-        child.env_map = &env_map;
-        child.stderr_behavior = .Ignore; // suppress worker exit tracebacks
-        try child.spawn();
+        const child = try std.process.spawn(self.runtime.io, .{
+            .argv = cmd,
+            .environ_map = &env_map,
+            .stderr = .ignore, // suppress worker exit tracebacks
+        });
         self.child_proc = child;
 
         // Accept the worker connection (blocks until worker connects).
-        const connection = try self.server.accept();
-        self.conn = connection.stream;
+        const accepted = try self.server.accept(self.runtime.io);
+        self.conn = accepted;
 
         // Send handshake frame.
         const handshake = try std.fmt.allocPrint(
@@ -289,7 +299,7 @@ pub const ForeignBridge = struct {
             .{ self.pid.beam, self.pid.proc, self.socket_path },
         );
         defer self.allocator.free(handshake);
-        try writeFrame(connection.stream, handshake);
+        try writeFrame(self.runtime.io, accepted, handshake);
 
         // warden-3cn: transition to running so the process can be paused/resumed
         try self.runtime.registry.transition(self.pid, .ready);
@@ -307,39 +317,45 @@ pub const ForeignBridge = struct {
         const conn = self.conn orelse return error.NotConnected;
 
         // warden-3cn: serialize body to JSON
-        var body_buf: std.ArrayList(u8) = .empty;
-        defer body_buf.deinit(self.allocator);
-        try writeJsonValue(body_buf.writer(self.allocator), msg.body);
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body_buf.deinit();
+        try writeJsonValue(&body_buf.writer, msg.body);
 
         const json = try std.fmt.allocPrint(
             self.allocator,
             "{{\"kind\":\"msg\",\"type\":\"{s}\",\"id\":\"{s}\",\"from\":\"{s}\",\"to\":\"{s}\",\"body\":{s}}}",
-            .{ msg.@"type", msg.id, msg.from, msg.to, body_buf.items },
+            .{ msg.@"type", msg.id, msg.from, msg.to, body_buf.writer.buffered() },
         );
         defer self.allocator.free(json);
 
         self.write_mutex.lock();
         defer self.write_mutex.unlock();
-        try writeFrame(conn, json);
+        try writeFrame(self.runtime.io, conn, json);
     }
 
     // warden-eet
     /// Stop the bridge: signal stop, close connection, join reader thread.
     pub fn stop(self: *ForeignBridge) !void {
         self.running.store(false, .release);
-        // Close the connection to unblock the reader thread.
+        // warden-3qh: shutdown (not close) to unblock the reader's in-flight read —
+        // closing the fd out from under it panics with BADF in 0.16's Io. The fd
+        // stays valid; the read returns EOF. Close after the thread has exited.
         if (self.conn) |c| {
-            c.close();
-            self.conn = null;
+            c.shutdown(self.runtime.io, .both) catch {};
         }
-        // Join reader thread.
+        // Join reader thread (now unblocked by the shutdown).
         if (self.reader_thread) |t| {
             t.join();
             self.reader_thread = null;
         }
+        // Safe to close now that no thread reads the fd.
+        if (self.conn) |c| {
+            c.close(self.runtime.io);
+            self.conn = null;
+        }
         // Wait for child process.
         if (self.child_proc) |*child| {
-            _ = child.wait() catch {};
+            _ = child.wait(self.runtime.io) catch {};
             self.child_proc = null;
         }
     }
@@ -366,23 +382,23 @@ pub const ForeignBridge = struct {
     }
 
     // warden-eet
-    fn handleSend(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+    fn handleSend(self: *ForeignBridge, conn: std.Io.net.Stream, obj: std.json.ObjectMap) !void {
         const to_str = strField(obj, "to") orelse {
-            try sendError(conn, self.allocator, "missing to");
+            try sendError(self.runtime.io, conn, self.allocator, "missing to");
             return;
         };
         const msg_type = strField(obj, "type") orelse {
-            try sendError(conn, self.allocator, "missing type");
+            try sendError(self.runtime.io, conn, self.allocator, "missing type");
             return;
         };
         const msg_id = strField(obj, "id") orelse {
-            try sendError(conn, self.allocator, "missing id");
+            try sendError(self.runtime.io, conn, self.allocator, "missing id");
             return;
         };
 
         // Parse destination PID.
         const to_pid = parsePidStr(to_str) catch {
-            try sendError(conn, self.allocator, "invalid to pid");
+            try sendError(self.runtime.io, conn, self.allocator, "invalid to pid");
             return;
         };
 
@@ -418,27 +434,27 @@ pub const ForeignBridge = struct {
 
         self.write_mutex.lock();
         defer self.write_mutex.unlock();
-        try sendOk(conn);
+        try sendOk(self.runtime.io, conn);
     }
 
     // warden-eet
-    fn handleReply(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+    fn handleReply(self: *ForeignBridge, conn: std.Io.net.Stream, obj: std.json.ObjectMap) !void {
         const reply_to_str = strField(obj, "reply_to") orelse {
-            try sendError(conn, self.allocator, "missing reply_to");
+            try sendError(self.runtime.io, conn, self.allocator, "missing reply_to");
             return;
         };
         const msg_type = strField(obj, "type") orelse {
-            try sendError(conn, self.allocator, "missing type");
+            try sendError(self.runtime.io, conn, self.allocator, "missing type");
             return;
         };
         const msg_id = strField(obj, "id") orelse {
-            try sendError(conn, self.allocator, "missing id");
+            try sendError(self.runtime.io, conn, self.allocator, "missing id");
             return;
         };
         const corr = strField(obj, "corr");
 
         const reply_to_pid = parsePidStr(reply_to_str) catch {
-            try sendError(conn, self.allocator, "invalid reply_to pid");
+            try sendError(self.runtime.io, conn, self.allocator, "invalid reply_to pid");
             return;
         };
 
@@ -453,10 +469,10 @@ pub const ForeignBridge = struct {
 
         // Serialize body to a string, then re-parse into the arena
         const body_raw = obj.get("body") orelse std.json.Value.null;
-        var body_buf: std.ArrayList(u8) = .empty;
-        defer body_buf.deinit(self.allocator);
-        try writeJsonValue(body_buf.writer(self.allocator), body_raw);
-        const body_parsed = try std.json.parseFromSlice(std.json.Value, ma, body_buf.items, .{});
+        var body_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body_buf.deinit();
+        try writeJsonValue(&body_buf.writer, body_raw);
+        const body_parsed = try std.json.parseFromSlice(std.json.Value, ma, body_buf.writer.buffered(), .{});
 
         const msg = MessageEnvelope{
             .kind = .response,
@@ -472,11 +488,11 @@ pub const ForeignBridge = struct {
 
         self.write_mutex.lock();
         defer self.write_mutex.unlock();
-        try sendOk(conn);
+        try sendOk(self.runtime.io, conn);
     }
 
     // warden-eet
-    fn handleLog(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+    fn handleLog(self: *ForeignBridge, conn: std.Io.net.Stream, obj: std.json.ObjectMap) !void {
         const level = strField(obj, "level") orelse "info";
         const message = strField(obj, "message") orelse "";
 
@@ -484,71 +500,71 @@ pub const ForeignBridge = struct {
 
         self.write_mutex.lock();
         defer self.write_mutex.unlock();
-        try sendOk(conn);
+        try sendOk(self.runtime.io, conn);
     }
 
     // warden-eet
-    fn handleFsWrite(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+    fn handleFsWrite(self: *ForeignBridge, conn: std.Io.net.Stream, obj: std.json.ObjectMap) !void {
         const ns_str = strField(obj, "ns") orelse {
-            try sendError(conn, self.allocator, "missing ns");
+            try sendError(self.runtime.io, conn, self.allocator, "missing ns");
             return;
         };
         const path = strField(obj, "path") orelse {
-            try sendError(conn, self.allocator, "missing path");
+            try sendError(self.runtime.io, conn, self.allocator, "missing path");
             return;
         };
         const data_b64 = strField(obj, "data") orelse {
-            try sendError(conn, self.allocator, "missing data");
+            try sendError(self.runtime.io, conn, self.allocator, "missing data");
             return;
         };
 
         const ns = parseNamespace(ns_str) catch {
-            try sendError(conn, self.allocator, "unknown namespace");
+            try sendError(self.runtime.io, conn, self.allocator, "unknown namespace");
             return;
         };
 
         // Decode base64 data.
         const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_b64) catch {
-            try sendError(conn, self.allocator, "invalid base64");
+            try sendError(self.runtime.io, conn, self.allocator, "invalid base64");
             return;
         };
         const decoded = try self.allocator.alloc(u8, decoded_len);
         defer self.allocator.free(decoded);
         std.base64.standard.Decoder.decode(decoded, data_b64) catch {
-            try sendError(conn, self.allocator, "base64 decode failed");
+            try sendError(self.runtime.io, conn, self.allocator, "base64 decode failed");
             return;
         };
 
         self.ctx.fsWrite(ns, path, decoded) catch |err| {
             const msg = @errorName(err);
-            try sendError(conn, self.allocator, msg);
+            try sendError(self.runtime.io, conn, self.allocator, msg);
             return;
         };
 
         self.write_mutex.lock();
         defer self.write_mutex.unlock();
-        try sendOk(conn);
+        try sendOk(self.runtime.io, conn);
     }
 
     // warden-eet
-    fn handleFsRead(self: *ForeignBridge, conn: std.net.Stream, obj: std.json.ObjectMap) !void {
+    fn handleFsRead(self: *ForeignBridge, conn: std.Io.net.Stream, obj: std.json.ObjectMap) !void {
         const ns_str = strField(obj, "ns") orelse {
-            try sendError(conn, self.allocator, "missing ns");
+            try sendError(self.runtime.io, conn, self.allocator, "missing ns");
             return;
         };
         const path = strField(obj, "path") orelse {
-            try sendError(conn, self.allocator, "missing path");
+            try sendError(self.runtime.io, conn, self.allocator, "missing path");
             return;
         };
 
         const ns = parseNamespace(ns_str) catch {
-            try sendError(conn, self.allocator, "unknown namespace");
+            try sendError(self.runtime.io, conn, self.allocator, "unknown namespace");
             return;
         };
 
         const data = self.ctx.fsRead(ns, path) catch |err| {
             const msg = @errorName(err);
-            try sendError(conn, self.allocator, msg);
+            try sendError(self.runtime.io, conn, self.allocator, msg);
             return;
         };
         defer self.allocator.free(data);
@@ -568,7 +584,7 @@ pub const ForeignBridge = struct {
 
         self.write_mutex.lock();
         defer self.write_mutex.unlock();
-        try writeFrame(conn, response);
+        try writeFrame(self.runtime.io, conn, response);
     }
 };
 
