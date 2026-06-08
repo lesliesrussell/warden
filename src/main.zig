@@ -17,25 +17,25 @@ fn sigHandler(_: c_int) callconv(.c) void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Config from environment.
-    const beam_id_str = std.posix.getenv("WARDEN_BEAM_ID") orelse "1";
+    const beam_id_str = warden.env.get("WARDEN_BEAM_ID") orelse "1";
     const beam_id = std.fmt.parseInt(u32, beam_id_str, 10) catch {
         std.debug.print("error: WARDEN_BEAM_ID must be a positive integer\n", .{});
         std.process.exit(1);
     };
 
-    const log_dir = std.posix.getenv("WARDEN_LOG_DIR");
+    const log_dir = warden.env.get("WARDEN_LOG_DIR");
 
     // Socket path: explicit env > default per-beam path in ~/.warden/sockets/.
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const socket_path: []const u8 = if (std.posix.getenv("WARDEN_CTRL_SOCKET")) |s|
+    const socket_path: []const u8 = if (warden.env.get("WARDEN_CTRL_SOCKET")) |s|
         resolveHome(&path_buf, s)
     else blk: {
-        const home = std.posix.getenv("HOME") orelse {
+        const home = warden.env.get("HOME") orelse {
             std.debug.print("error: HOME not set and WARDEN_CTRL_SOCKET not provided\n", .{});
             std.process.exit(1);
         };
@@ -90,6 +90,6 @@ pub fn main() !void {
 
 fn resolveHome(buf: []u8, path: []const u8) []const u8 {
     if (!std.mem.startsWith(u8, path, "~/")) return path;
-    const home = std.posix.getenv("HOME") orelse return path;
+    const home = warden.env.get("HOME") orelse return path;
     return std.fmt.bufPrint(buf, "{s}{s}", .{ home, path[1..] }) catch return path;
 }

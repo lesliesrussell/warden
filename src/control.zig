@@ -7,6 +7,7 @@
 // Activation: call ControlServer.init() then .start().
 
 const std = @import("std");
+const env = @import("env.zig");
 const clock = @import("clock.zig");
 const beam_mod = @import("beam.zig");
 const bridge_mod = @import("bridge.zig");
@@ -1013,7 +1014,7 @@ pub const ControlServer = struct {
 
     // warden-4ga
     fn writeSidecar(self: *ControlServer) !void {
-        const home = std.posix.getenv("HOME") orelse return error.NoHome;
+        const home = env.get("HOME") orelse return error.NoHome;
         const dir_path = try std.fmt.allocPrint(self.allocator, "{s}/.warden/sockets", .{home});
         defer self.allocator.free(dir_path);
 

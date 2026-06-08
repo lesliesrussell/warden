@@ -51,7 +51,7 @@ fn matchResOk(msg: MessageEnvelope) bool {
 
 // warden-3cn
 test "live demo: topology and messaging" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

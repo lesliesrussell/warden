@@ -1,6 +1,7 @@
 // warden-39v
 
 const std = @import("std");
+const env = @import("env.zig");
 const clock = @import("clock.zig");
 const beam = @import("beam.zig");
 const control = @import("control.zig");
@@ -498,7 +499,7 @@ test "control server: proc.control promote sets activity_class and ttl" {
 test "control server: sidecar written on start, removed on stop" {
     const allocator = std.testing.allocator;
 
-    const home = std.posix.getenv("HOME") orelse return error.SkipZigTest;
+    const home = env.get("HOME") orelse return error.SkipZigTest;
 
     const rt = try beam.Runtime.init(allocator, 91);
     defer rt.destroy();

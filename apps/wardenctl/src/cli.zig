@@ -23,6 +23,15 @@ pub const GlobalOpts = struct {
 
 const default_socket = "~/.warden/ctrl.sock";
 
+// warden-l3i: Zig 0.16 removed std.posix.getenv; the start code populates the
+// global executor's environ block from envp. getPosix is a non-allocating,
+// runtime-key scan of that block — a drop-in for the old getenv. wardenctl is a
+// standalone module with no access to the warden lib's env helper, so this is a
+// small local copy.
+fn getenv(name: []const u8) ?[:0]const u8 {
+    return std.Io.Threaded.global_single_threaded.environ.process_environ.getPosix(name);
+}
+
 // warden-4ga
 const SocketEntry = struct {
     socket_path: []u8, // heap-owned
@@ -32,7 +41,7 @@ const SocketEntry = struct {
 // warden-4ga
 // Scan ~/.warden/sockets/*.json and return all valid, reachable socket entries.
 fn discoverSockets(allocator: std.mem.Allocator) ![]SocketEntry {
-    const home = std.posix.getenv("HOME") orelse return &.{};
+    const home = getenv("HOME") orelse return &.{};
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/.warden/sockets", .{home});
     defer allocator.free(dir_path);
 
@@ -89,7 +98,7 @@ fn beamIdFromPid(pid: []const u8) ?u32 {
 
 // warden-39v
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    const env_socket = std.posix.getenv("WARDEN_CTRL_SOCKET");
+    const env_socket = getenv("WARDEN_CTRL_SOCKET");
     var opts = GlobalOpts{
         .socket_path = env_socket orelse default_socket,
         .socket_explicit = env_socket != null,
@@ -367,7 +376,7 @@ fn parseDuration(s: []const u8) !u64 {
 
 fn resolveHome(buf: []u8, path: []const u8) []const u8 {
     if (!std.mem.startsWith(u8, path, "~/")) return path;
-    const home = std.posix.getenv("HOME") orelse return path;
+    const home = getenv("HOME") orelse return path;
     const result = std.fmt.bufPrint(buf, "{s}{s}", .{ home, path[1..] }) catch return path;
     return result;
 }
