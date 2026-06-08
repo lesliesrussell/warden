@@ -1,6 +1,7 @@
 // warden-mf3
 
 const std = @import("std");
+const term = @import("../term.zig");
 const ControlClient = @import("../client.zig").ControlClient;
 
 pub const Filter = struct {
@@ -15,22 +16,21 @@ pub fn run(
     json_output: bool,
     beam_label: ?u32,
 ) !void {
-    var payload_buf: std.ArrayList(u8) = .empty;
-    defer payload_buf.deinit(allocator);
-    const pw = payload_buf.writer(allocator);
+    var payload_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer payload_buf.deinit();
+    const pw = &payload_buf.writer;
 
     try pw.writeByte('{');
     if (filter.beam) |b| try pw.print("\"beam\":{d}", .{b});
     try pw.writeByte('}');
 
-    const resp_bytes = try client.requestWithPayload("topology.get", payload_buf.items);
+    const resp_bytes = try client.requestWithPayload("topology.get", payload_buf.writer.buffered());
     defer allocator.free(resp_bytes);
 
-    const stdout = std.fs.File.stdout();
 
     if (json_output) {
-        try stdout.writeAll(resp_bytes);
-        try stdout.writeAll("\n");
+        term.outAll(resp_bytes);
+        term.outAll("\n");
         return;
     }
 
@@ -44,10 +44,9 @@ pub fn run(
                 .string => |s| s,
                 else => "unknown error",
             };
-            const stderr = std.fs.File.stderr();
-            try stderr.writeAll("error: topology.get failed: ");
-            try stderr.writeAll(msg);
-            try stderr.writeAll("\n");
+            term.errAll("error: topology.get failed: ");
+            term.errAll(msg);
+            term.errAll("\n");
             return error.RequestFailed;
         },
         else => return error.InvalidResponse,
@@ -59,24 +58,24 @@ pub fn run(
     if (beam_label) |bid| {
         const lbl = try std.fmt.allocPrint(allocator, "beam {d}:\n", .{bid});
         defer allocator.free(lbl);
-        try stdout.writeAll(lbl);
+        term.outAll(lbl);
     }
 
     if (roots.items.len == 0) {
-        try stdout.writeAll("  (no processes)\n\n");
+        term.outAll("  (no processes)\n\n");
         return;
     }
 
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    const w = out.writer(allocator);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const w = &out.writer;
 
     for (roots.items) |root| {
         try renderRoot(allocator, root, w);
     }
     try w.writeByte('\n');
 
-    try stdout.writeAll(out.items);
+    term.outAll(out.writer.buffered());
 }
 
 fn renderRoot(allocator: std.mem.Allocator, node: std.json.Value, w: anytype) !void {

@@ -1,6 +1,7 @@
 // warden-aai
 
 const std = @import("std");
+const term = @import("../term.zig");
 const ControlClient = @import("../client.zig").ControlClient;
 
 // warden-aai
@@ -35,9 +36,9 @@ pub fn runPromote(
     opts: PromoteOpts,
     json_output: bool,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.print("{{\"pid\":\"{s}\",\"op\":\"promote\",\"class\":\"{s}\"", .{ pid, opts.class });
     if (opts.ttl_ms) |t| try w.print(",\"ttl_ms\":{d}", .{t});
@@ -51,7 +52,7 @@ pub fn runPromote(
     }
     try w.writeByte('}');
 
-    try runWithPayload(allocator, client, "promote", pid, buf.items, json_output);
+    try runWithPayload(allocator, client, "promote", pid, buf.writer.buffered(), json_output);
 }
 
 pub fn runWithReason(
@@ -62,9 +63,9 @@ pub fn runWithReason(
     reason: ?[]const u8,
     json_output: bool,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
 
     try w.print("{{\"pid\":\"{s}\",\"op\":\"{s}\"", .{ pid, op });
     if (reason) |r| {
@@ -77,7 +78,7 @@ pub fn runWithReason(
     }
     try w.writeByte('}');
 
-    try runWithPayload(allocator, client, op, pid, buf.items, json_output);
+    try runWithPayload(allocator, client, op, pid, buf.writer.buffered(), json_output);
 }
 
 fn runWithPayload(
@@ -91,11 +92,10 @@ fn runWithPayload(
     const resp_bytes = try client.requestWithPayload("proc.control", payload);
     defer allocator.free(resp_bytes);
 
-    const stdout = std.fs.File.stdout();
 
     if (json_output) {
-        try stdout.writeAll(resp_bytes);
-        try stdout.writeAll("\n");
+        term.outAll(resp_bytes);
+        term.outAll("\n");
         return;
     }
 
@@ -109,10 +109,9 @@ fn runWithPayload(
                 .string => |s| s,
                 else => "unknown error",
             };
-            const stderr = std.fs.File.stderr();
-            try stderr.writeAll("error: proc.control failed: ");
-            try stderr.writeAll(msg);
-            try stderr.writeAll("\n");
+            term.errAll("error: proc.control failed: ");
+            term.errAll(msg);
+            term.errAll("\n");
             std.process.exit(1);
         },
         else => return error.InvalidResponse,
@@ -120,5 +119,5 @@ fn runWithPayload(
 
     const line = try std.fmt.allocPrint(allocator, "{s} {s}\n", .{ op, pid });
     defer allocator.free(line);
-    try stdout.writeAll(line);
+    term.outAll(line);
 }

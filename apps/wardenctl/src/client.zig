@@ -5,40 +5,51 @@
 // Does NOT import the warden core module — only uses stdlib + this file.
 
 const std = @import("std");
+const term = @import("term.zig");
 
-fn writeFrame(stream: std.net.Stream, json: []const u8) !void {
+// warden-3qh: Zig 0.16 — sockets are std.Io.net; frame I/O via buffered
+// Stream.Writer/Reader over the global executor.
+fn writeFrame(stream: std.Io.net.Stream, json: []const u8) !void {
     var hdr: [4]u8 = undefined;
     std.mem.writeInt(u32, &hdr, @intCast(json.len), .big);
-    try stream.writeAll(&hdr);
-    try stream.writeAll(json);
+    var wbuf: [4096]u8 = undefined;
+    var w = stream.writer(term.gio(), &wbuf);
+    try w.interface.writeAll(&hdr);
+    try w.interface.writeAll(json);
+    try w.interface.flush();
 }
 
-fn readFrame(allocator: std.mem.Allocator, stream: std.net.Stream) ![]u8 {
+/// Read one length-prefixed JSON frame from a persistent reader. Caller owns
+/// the returned slice. The reader must persist across frames (streaming logs)
+/// so bytes already buffered off the socket are not lost.
+fn readFrame(allocator: std.mem.Allocator, r: *std.Io.Reader) ![]u8 {
     var hdr: [4]u8 = undefined;
-    const n = try stream.readAtLeast(&hdr, 4);
-    if (n < 4) return error.ConnectionClosed;
+    r.readSliceAll(&hdr) catch return error.ConnectionClosed;
     const length = std.mem.readInt(u32, &hdr, .big);
     if (length == 0) return error.EmptyFrame;
     const buf = try allocator.alloc(u8, length);
     errdefer allocator.free(buf);
-    const read = try stream.readAtLeast(buf, length);
-    if (read < length) return error.ConnectionClosed;
+    r.readSliceAll(buf) catch return error.ConnectionClosed;
     return buf;
 }
 
 // warden-39v
 pub const ControlClient = struct {
     allocator: std.mem.Allocator,
-    stream: std.net.Stream,
+    stream: std.Io.net.Stream,
     req_counter: u32,
+    // warden-3qh: lazily-initialized persistent reader (points into rbuf, so it
+    // is created only once `self` is at its final stable address).
+    rbuf: [4096]u8 = undefined,
+    reader: ?std.Io.net.Stream.Reader = null,
 
     pub fn connect(allocator: std.mem.Allocator, socket_path: []const u8) !ControlClient {
-        const stream = std.net.connectUnixSocket(socket_path) catch |err| switch (err) {
+        var ua = std.Io.net.UnixAddress.init(socket_path) catch return error.RuntimeNotListening;
+        const stream = ua.connect(term.gio()) catch |err| switch (err) {
             error.FileNotFound => {
-                const stderr = std.fs.File.stderr();
-                stderr.writeAll("error: no Warden runtime listening at '") catch {};
-                stderr.writeAll(socket_path) catch {};
-                stderr.writeAll("'\n  Start the runtime with WARDEN_CTRL_SOCKET set, or use --socket.\n") catch {};
+                term.errAll("error: no Warden runtime listening at '");
+                term.errAll(socket_path);
+                term.errAll("'\n  Start the runtime with WARDEN_CTRL_SOCKET set, or use --socket.\n");
                 return error.RuntimeNotListening;
             },
             else => return err,
@@ -51,7 +62,12 @@ pub const ControlClient = struct {
     }
 
     pub fn close(self: *ControlClient) void {
-        self.stream.close();
+        self.stream.close(term.gio());
+    }
+
+    fn rd(self: *ControlClient) *std.Io.Reader {
+        if (self.reader == null) self.reader = self.stream.reader(term.gio(), &self.rbuf);
+        return &self.reader.?.interface;
     }
 
     /// Send an action request and return the raw JSON response. Caller owns the slice.
@@ -81,6 +97,6 @@ pub const ControlClient = struct {
 
     /// Read one response frame. Caller owns the returned slice.
     pub fn recvFrame(self: *ControlClient) ![]u8 {
-        return readFrame(self.allocator, self.stream);
+        return readFrame(self.allocator, self.rd());
     }
 };

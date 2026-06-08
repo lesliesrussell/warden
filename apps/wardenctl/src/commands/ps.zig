@@ -1,6 +1,7 @@
 // warden-di6
 
 const std = @import("std");
+const term = @import("../term.zig");
 const ControlClient = @import("../client.zig").ControlClient;
 
 pub const Filter = struct {
@@ -18,9 +19,9 @@ pub fn run(
     show_header: bool,
 ) !void {
     // Build payload JSON from active filters.
-    var payload_buf: std.ArrayList(u8) = .empty;
-    defer payload_buf.deinit(allocator);
-    const pw = payload_buf.writer(allocator);
+    var payload_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer payload_buf.deinit();
+    const pw = &payload_buf.writer;
 
     try pw.writeByte('{');
     var sep = false;
@@ -39,14 +40,13 @@ pub fn run(
     }
     try pw.writeByte('}');
 
-    const resp_bytes = try client.requestWithPayload("proc.list", payload_buf.items);
+    const resp_bytes = try client.requestWithPayload("proc.list", payload_buf.writer.buffered());
     defer allocator.free(resp_bytes);
 
-    const stdout = std.fs.File.stdout();
 
     if (json_output) {
-        try stdout.writeAll(resp_bytes);
-        try stdout.writeAll("\n");
+        term.outAll(resp_bytes);
+        term.outAll("\n");
         return;
     }
 
@@ -60,10 +60,9 @@ pub fn run(
                 .string => |s| s,
                 else => "unknown error",
             };
-            const stderr = std.fs.File.stderr();
-            try stderr.writeAll("error: proc.list failed: ");
-            try stderr.writeAll(msg);
-            try stderr.writeAll("\n");
+            term.errAll("error: proc.list failed: ");
+            term.errAll(msg);
+            term.errAll("\n");
             return error.RequestFailed;
         },
         else => return error.InvalidResponse,
@@ -77,7 +76,7 @@ pub fn run(
             "{s:<6} {s:<6} {s:<20} {s:<12} {s:<10} {s}\n",
             .{ "BEAM", "PID", "KIND", "STATE", "POLICY", "LAST ACTIVE" });
         defer allocator.free(header);
-        try stdout.writeAll(header);
+        term.outAll(header);
     }
 
     for (procs.items) |proc_val| {
@@ -96,7 +95,7 @@ pub fn run(
             "{d:<6} {d:<6} {s:<20} {s:<12} {s:<10} {s}\n",
             .{ beam_id, pid, kind, state, policy, last_str });
         defer allocator.free(row);
-        try stdout.writeAll(row);
+        term.outAll(row);
     }
 }
 

@@ -1,6 +1,7 @@
 // warden-39v
 
 const std = @import("std");
+const term = @import("term.zig");
 const ControlClient = @import("client.zig").ControlClient;
 const beams_cmd = @import("commands/beams.zig");
 // warden-di6
@@ -45,8 +46,8 @@ fn discoverSockets(allocator: std.mem.Allocator) ![]SocketEntry {
     const dir_path = try std.fmt.allocPrint(allocator, "{s}/.warden/sockets", .{home});
     defer allocator.free(dir_path);
 
-    var dir = std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return &.{};
-    defer dir.close();
+    var dir = std.Io.Dir.openDirAbsolute(term.gio(), dir_path, .{ .iterate = true }) catch return &.{};
+    defer dir.close(term.gio());
 
     var entries: std.ArrayList(SocketEntry) = .empty;
     errdefer {
@@ -55,10 +56,10 @@ fn discoverSockets(allocator: std.mem.Allocator) ![]SocketEntry {
     }
 
     var it = dir.iterate();
-    while (try it.next()) |de| {
+    while (try it.next(term.gio())) |de| {
         if (!std.mem.endsWith(u8, de.name, ".json")) continue;
 
-        const content = dir.readFileAlloc(allocator, de.name, 4096) catch continue;
+        const content = dir.readFileAlloc(term.gio(), de.name, allocator, .limited(4096)) catch continue;
         defer allocator.free(content);
 
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch continue;
@@ -75,8 +76,9 @@ fn discoverSockets(allocator: std.mem.Allocator) ![]SocketEntry {
         };
 
         // Verify the socket is actually reachable; skip stale sidecars.
-        const test_stream = std.net.connectUnixSocket(sp) catch continue;
-        test_stream.close();
+        var test_ua = std.Io.net.UnixAddress.init(sp) catch continue;
+        const test_stream = test_ua.connect(term.gio()) catch continue;
+        test_stream.close(term.gio());
 
         const owned_sp = try allocator.dupe(u8, sp);
         try entries.append(allocator, .{ .socket_path = owned_sp, .beam_id = bid });
@@ -154,9 +156,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer freeSocketEntries(allocator, sockets);
 
         if (sockets.len == 0) {
-            const stderr = std.fs.File.stderr();
-            try stderr.writeAll("wardenctl: no Warden runtimes found\n");
-            try stderr.writeAll("  Start a runtime, or use --socket to specify a path.\n");
+            term.errAll("wardenctl: no Warden runtimes found\n");
+            term.errAll("  Start a runtime, or use --socket to specify a path.\n");
             std.process.exit(1);
         }
 
@@ -193,11 +194,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             const entry = for (sockets) |e| {
                 if (e.beam_id == beam_id) break e;
             } else {
-                const stderr = std.fs.File.stderr();
                 const msg = try std.fmt.allocPrint(
                     allocator, "wardenctl: no runtime found for beam {d}\n", .{beam_id});
                 defer allocator.free(msg);
-                try stderr.writeAll(msg);
+                term.errAll(msg);
                 std.process.exit(1);
             };
             var client = ControlClient.connect(allocator, entry.socket_path) catch |err| {
@@ -207,8 +207,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
             defer client.close();
             try dispatch(allocator, subcmd, sub_args, &client, opts);
         } else {
-            const stderr = std.fs.File.stderr();
-            try stderr.writeAll("wardenctl: multiple runtimes running — use --socket or include beam id in pid (beam/proc)\n");
+            term.errAll("wardenctl: multiple runtimes running — use --socket or include beam id in pid (beam/proc)\n");
             std.process.exit(1);
         }
     }
@@ -382,16 +381,14 @@ fn resolveHome(buf: []u8, path: []const u8) []const u8 {
 }
 
 fn usageErr(msg: []const u8) error{UsageError} {
-    const stderr = std.fs.File.stderr();
-    stderr.writeAll("wardenctl: ") catch {};
-    stderr.writeAll(msg) catch {};
-    stderr.writeAll("\nRun 'wardenctl --help' for usage.\n") catch {};
+    term.errAll("wardenctl: ");
+    term.errAll(msg);
+    term.errAll("\nRun 'wardenctl --help' for usage.\n");
     std.process.exit(1);
 }
 
 fn printUsage() void {
-    const stderr = std.fs.File.stderr();
-    stderr.writeAll(
+    term.errAll(
         \\Usage: wardenctl [--socket <path>] [--json] <command>
         \\
         \\Commands:
@@ -410,6 +407,6 @@ fn printUsage() void {
         \\  --json            Machine-readable JSON output
         \\  -q, --quiet       Suppress non-essential output
         \\
-    ) catch {};
+    );
     std.process.exit(0);
 }

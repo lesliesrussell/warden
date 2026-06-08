@@ -1,6 +1,7 @@
 // warden-9jm
 
 const std = @import("std");
+const term = @import("../term.zig");
 const ControlClient = @import("../client.zig").ControlClient;
 
 pub const Options = struct {
@@ -17,9 +18,9 @@ pub fn run(
     opts: Options,
     json_output: bool,
 ) !void {
-    var payload_buf: std.ArrayList(u8) = .empty;
-    defer payload_buf.deinit(allocator);
-    const pw = payload_buf.writer(allocator);
+    var payload_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer payload_buf.deinit();
+    const pw = &payload_buf.writer;
 
     try pw.print("{{\"pid\":\"{s}\"", .{opts.pid});
     if (opts.since_ms > 0) try pw.print(",\"since_ms\":{d}", .{opts.since_ms});
@@ -34,16 +35,15 @@ pub fn run(
     if (opts.follow) try pw.writeAll(",\"follow\":true");
     try pw.writeByte('}');
 
-    const stdout = std.fs.File.stdout();
 
     if (!opts.follow) {
         // Single-shot: one request, one response.
-        const resp_bytes = try client.requestWithPayload("logs.stream", payload_buf.items);
+        const resp_bytes = try client.requestWithPayload("logs.stream", payload_buf.writer.buffered());
         defer allocator.free(resp_bytes);
 
         if (json_output) {
-            try stdout.writeAll(resp_bytes);
-            try stdout.writeAll("\n");
+            term.outAll(resp_bytes);
+            term.outAll("\n");
             return;
         }
 
@@ -57,10 +57,9 @@ pub fn run(
                     .string => |s| s,
                     else => "unknown error",
                 };
-                const stderr = std.fs.File.stderr();
-                try stderr.writeAll("error: logs.stream failed: ");
-                try stderr.writeAll(msg);
-                try stderr.writeAll("\n");
+                term.errAll("error: logs.stream failed: ");
+                term.errAll(msg);
+                term.errAll("\n");
                 return error.RequestFailed;
             },
             else => return error.InvalidResponse,
@@ -69,13 +68,13 @@ pub fn run(
         const lines = obj.get("payload").?.object.get("lines").?.array;
         for (lines.items) |line_val| {
             const raw = line_val.string;
-            try printLine(allocator, stdout, raw, opts.pid);
+            try printLine(allocator, raw, opts.pid);
         }
         return;
     }
 
     // Follow mode: streaming frames.
-    try client.sendRequest("logs.stream", payload_buf.items);
+    try client.sendRequest("logs.stream", payload_buf.writer.buffered());
 
     // Read initial streaming confirmation frame.
     const init_bytes = try client.recvFrame();
@@ -102,20 +101,20 @@ pub fn run(
             else => break,
         };
         if (json_output) {
-            try stdout.writeAll(data);
-            try stdout.writeAll("\n");
+            term.outAll(data);
+            term.outAll("\n");
         } else {
-            try printLine(allocator, stdout, data, opts.pid);
+            try printLine(allocator, data, opts.pid);
         }
     }
 }
 
-fn printLine(allocator: std.mem.Allocator, stdout: std.fs.File, raw: []const u8, pid: []const u8) !void {
+fn printLine(allocator: std.mem.Allocator, raw: []const u8, pid: []const u8) !void {
     // Parse a few key fields for human-readable output.
     // Fall back to raw if parsing fails.
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch {
-        try stdout.writeAll(raw);
-        try stdout.writeAll("\n");
+        term.outAll(raw);
+        term.outAll("\n");
         return;
     };
     defer parsed.deinit();
@@ -150,5 +149,5 @@ fn printLine(allocator: std.mem.Allocator, stdout: std.fs.File, raw: []const u8,
         "{d:.3}  pid={s}  event={s}  {s}\n",
         .{ ts, pid, event, detail });
     defer allocator.free(line);
-    try stdout.writeAll(line);
+    term.outAll(line);
 }

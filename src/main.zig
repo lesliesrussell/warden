@@ -74,7 +74,7 @@ pub fn main() !void {
 
     // Install signal handlers.
     const act = std.posix.Sigaction{
-        .handler = .{ .handler = sigHandler },
+        .handler = .{ .handler = @ptrCast(&sigHandler) },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };

@@ -1,6 +1,7 @@
 // warden-39v
 
 const std = @import("std");
+const term = @import("../term.zig");
 const ControlClient = @import("../client.zig").ControlClient;
 
 // warden-39v
@@ -8,11 +9,10 @@ pub fn run(allocator: std.mem.Allocator, client: *ControlClient, json_output: bo
     const resp_bytes = try client.request("beam.list");
     defer allocator.free(resp_bytes);
 
-    const stdout = std.fs.File.stdout();
 
     if (json_output) {
-        try stdout.writeAll(resp_bytes);
-        try stdout.writeAll("\n");
+        term.outAll(resp_bytes);
+        term.outAll("\n");
         return;
     }
 
@@ -26,10 +26,9 @@ pub fn run(allocator: std.mem.Allocator, client: *ControlClient, json_output: bo
                 .string => |s| s,
                 else => "unknown error",
             };
-            const stderr = std.fs.File.stderr();
-            try stderr.writeAll("error: beam.list failed: ");
-            try stderr.writeAll(msg);
-            try stderr.writeAll("\n");
+            term.errAll("error: beam.list failed: ");
+            term.errAll(msg);
+            term.errAll("\n");
             return error.RequestFailed;
         },
         else => return error.InvalidResponse,
@@ -42,7 +41,7 @@ pub fn run(allocator: std.mem.Allocator, client: *ControlClient, json_output: bo
         const header = try std.fmt.allocPrint(allocator, "{s:<6} {s:<9} {s:<9} {s}\n",
             .{ "BEAM", "VERSION", "UPTIME", "PROCS" });
         defer allocator.free(header);
-        try stdout.writeAll(header);
+        term.outAll(header);
     }
 
     for (beams.items) |beam_val| {
@@ -58,7 +57,7 @@ pub fn run(allocator: std.mem.Allocator, client: *ControlClient, json_output: bo
         const row = try std.fmt.allocPrint(allocator, "{d:<6} {s:<9} {s:<9} {d}\n",
             .{ beam_id, version, uptime_str, proc_count });
         defer allocator.free(row);
-        try stdout.writeAll(row);
+        term.outAll(row);
     }
 }
 
