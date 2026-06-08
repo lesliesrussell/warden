@@ -258,10 +258,10 @@ const bytes = try ctx.fsRead(.proc_state, "checkpoint");
 
 ## Build and test
 
-Requires Zig 0.15.2.
+Requires Zig 0.16.0.
 
 ```bash
-zig build test     # run all 106 tests
+zig build test     # run all 110 tests
 zig build          # compile wardenctl + runtime library
 ```
 
