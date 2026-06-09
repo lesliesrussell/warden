@@ -135,6 +135,8 @@ Commands:
                            Restrict process to minimum resources
   promote <beam/proc> [--class elevated] [--ttl 30s] [--reason '...']
                            Promote process activity class
+  renice <beam> <ms>       Adjust a beam's foreign-worker reaper poll interval
+                           (10–2000ms; lower = faster crash detection)
 ```
 
 The runtime exposes a Unix socket at `~/.warden/ctrl.sock` by default (override with `$WARDEN_CTRL_SOCKET` or `--socket`).
@@ -191,7 +193,8 @@ See `warden/` for the SDK and `examples/python_worker/` for a complete example.
 | Logging engine | `src/logger.zig` | Per-process append-only NDJSON stream |
 | Storage engine | `src/storage.zig` | `proc-temp`, `proc-cache`, `proc-state`, `shared-vol` namespace mediation |
 | Public API | `src/beam.zig` | `Runtime`, `Ctx`, and the full `beam.*` facade |
-| Foreign bridge | `src/bridge.zig` | Length-prefixed JSON frames over Unix domain socket |
+| Foreign bridge | `src/bridge.zig` | Length-prefixed JSON frames over Unix domain socket; per-worker reaper that auto-restarts crashed foreign workers |
+| Restart policy | `src/restart.zig` | Foreign-worker restart decision (permanent/transient/temporary) + runaway guard |
 
 ### Process model
 
@@ -211,6 +214,27 @@ Every process has:
 | `rest_for_one` | Restart failed child + all started after it |
 | `transient` | Restart only on abnormal exit |
 | `temporary` | Never restart |
+
+### Foreign worker auto-restart
+
+Foreign (e.g. Python) workers spawned via `proc.spawn` are supervised the same way:
+a per-beam reaper thread watches each worker's bridge and, when the worker crashes
+(socket drop or process exit), respawns it as a fresh incarnation (new PID) without
+human intervention.
+
+Each worker carries its own restart policy, set with the optional `restart` field on
+`proc.spawn` (default `permanent`):
+
+| Policy | Behavior on exit |
+|---|---|
+| `permanent` | Always restart (default) |
+| `transient` | Restart only on abnormal exit (non-zero / signal) |
+| `temporary` | Never restart |
+
+A runaway guard caps restarts at **3 within a 5s window** per worker; a worker that
+exceeds it is retired and logged (`restart` / give-up events in its NDJSON stream).
+The reaper's poll cadence (default 50ms) is adjustable on the fly per beam via the
+`beam.reaper` RPC or `wardenctl renice <beam> <ms>`.
 
 ### Storage namespaces
 
@@ -261,7 +285,7 @@ const bytes = try ctx.fsRead(.proc_state, "checkpoint");
 Requires Zig 0.16.0.
 
 ```bash
-zig build test     # run all 110 tests
+zig build test     # run all 116 tests
 zig build          # compile wardenctl + runtime library
 ```
 
