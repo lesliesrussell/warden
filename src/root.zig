@@ -34,6 +34,8 @@ pub const control = @import("control.zig");
 pub const sync = @import("sync.zig");
 // warden-foo
 pub const clock = @import("clock.zig");
+// warden-dmg
+pub const restart = @import("restart.zig");
 // warden-l3i
 pub const env = @import("env.zig");
 
@@ -70,4 +72,6 @@ comptime {
     _ = @import("live_demo_test.zig");
     // warden-d8p
     _ = @import("sync.zig");
+    // warden-dmg
+    _ = @import("restart.zig");
 }
