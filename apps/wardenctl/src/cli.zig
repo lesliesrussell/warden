@@ -12,6 +12,8 @@ const topology_cmd = @import("commands/topology.zig");
 const logs_cmd = @import("commands/logs.zig");
 // warden-aai
 const control_cmd = @import("commands/control.zig");
+// warden-dmg
+const renice_cmd = @import("commands/renice.zig");
 
 // warden-39v
 pub const GlobalOpts = struct {
@@ -317,6 +319,12 @@ fn dispatch(
             }
         }
         try control_cmd.runPromote(allocator, client, sub_args[0], promote_opts, opts.json_output);
+    } else if (std.mem.eql(u8, subcmd, "renice")) {
+        // warden-dmg
+        if (sub_args.len < 2) return usageErr("renice requires <beam> <interval_ms>");
+        const beam = std.fmt.parseInt(u32, sub_args[0], 10) catch return usageErr("beam must be an integer");
+        const interval = std.fmt.parseInt(u64, sub_args[1], 10) catch return usageErr("interval_ms must be an integer");
+        try renice_cmd.run(allocator, client, beam, interval, opts.json_output);
     } else {
         return usageErr("unknown subcommand");
     }
@@ -401,6 +409,7 @@ fn printUsage() void {
         \\  kill <pid>           Kill a process (requires --force)
         \\  quarantine <pid>     Restrict process to minimum resources (requires --force)
         \\  promote <pid>        Promote process activity class (--class, --ttl, --reason)
+        \\  renice <beam> <ms>   Adjust a beam's worker-reaper poll interval (10-2000)
         \\
         \\Global options:
         \\  --socket <path>   Control socket path (default: auto-discover from ~/.warden/sockets/)
