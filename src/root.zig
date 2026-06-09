@@ -74,4 +74,6 @@ comptime {
     _ = @import("sync.zig");
     // warden-dmg
     _ = @import("restart.zig");
+    // warden-dmg
+    _ = @import("foreign_restart_test.zig");
 }
