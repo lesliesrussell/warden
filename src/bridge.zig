@@ -624,29 +624,82 @@ fn strField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     };
 }
 
+// warden-dmg
+const restart_mod = @import("restart.zig");
+
+// warden-dmg
+/// A foreign worker under supervision: its live bridge plus everything needed
+/// to respawn it after a crash, and its per-worker runaway-guard state.
+pub const ManagedWorker = struct {
+    bridge: *ForeignBridge,
+    // Retained respawn inputs (deep-owned copies).
+    cmd: [][]u8,
+    log_dir: []u8,
+    storage_base: []u8,
+    parent_pid: ?Pid,
+    strategy: restart_mod.Strategy,
+    // Runaway guard (per worker).
+    restart_timestamps: std.ArrayList(i64),
+    restart_count: u32,
+    retired: bool,
+
+    fn freeOwned(self: *ManagedWorker, allocator: std.mem.Allocator) void {
+        for (self.cmd) |a| allocator.free(a);
+        allocator.free(self.cmd);
+        allocator.free(self.log_dir);
+        allocator.free(self.storage_base);
+        self.restart_timestamps.deinit(allocator);
+    }
+};
+
+// warden-dmg: deep-copy an argv into owned memory.
+fn dupeCmd(allocator: std.mem.Allocator, cmd: []const []const u8) ![][]u8 {
+    const out = try allocator.alloc([]u8, cmd.len);
+    var n: usize = 0;
+    errdefer {
+        for (out[0..n]) |a| allocator.free(a);
+        allocator.free(out);
+    }
+    for (cmd) |a| {
+        out[n] = try allocator.dupe(u8, a);
+        n += 1;
+    }
+    return out;
+}
+
 // warden-eet
 /// Supervisor that manages a pool of ForeignBridge instances.
 pub const BridgeSupervisor = struct {
     allocator: std.mem.Allocator,
     runtime: *Runtime,
-    bridges: std.ArrayList(*ForeignBridge),
+    workers: std.ArrayList(*ManagedWorker),
+    // warden-dmg: reaper cadence (ms), adjustable via renice().
+    reaper_interval_ms: std.atomic.Value(u64),
+    reaper_stopping: std.atomic.Value(bool),
+    reaper_thread: ?std.Thread,
 
     // warden-eet
     pub fn init(allocator: std.mem.Allocator, runtime: *Runtime) BridgeSupervisor {
         return BridgeSupervisor{
             .allocator = allocator,
             .runtime = runtime,
-            .bridges = .empty,
+            // warden-dmg
+            .workers = .empty,
+            .reaper_interval_ms = std.atomic.Value(u64).init(restart_mod.default_interval_ms),
+            .reaper_stopping = std.atomic.Value(bool).init(false),
+            .reaper_thread = null,
         };
     }
 
-    // warden-eet
+    // warden-eet, warden-dmg
     pub fn deinit(self: *BridgeSupervisor) void {
-        for (self.bridges.items) |b| {
-            b.deinit();
-            self.allocator.destroy(b);
+        for (self.workers.items) |w| {
+            w.bridge.deinit();
+            self.allocator.destroy(w.bridge);
+            w.freeOwned(self.allocator);
+            self.allocator.destroy(w);
         }
-        self.bridges.deinit(self.allocator);
+        self.workers.deinit(self.allocator);
     }
 
     // warden-eet
@@ -657,19 +710,19 @@ pub const BridgeSupervisor = struct {
         log_dir: []const u8,
         storage_base: []const u8,
     ) !Pid {
-        return self.spawnWorkerUnder(cmd, log_dir, storage_base, null);
+        return self.spawnWorkerUnder(cmd, log_dir, storage_base, null, .permanent);
     }
 
-    // warden-7oi
+    // warden-7oi, warden-dmg
     /// Return the bridge managing pid, or null if none.
     pub fn findBridge(self: *BridgeSupervisor, pid: Pid) ?*ForeignBridge {
-        for (self.bridges.items) |b| {
-            if (b.pid.beam == pid.beam and b.pid.proc == pid.proc) return b;
+        for (self.workers.items) |w| {
+            if (w.bridge.pid.beam == pid.beam and w.bridge.pid.proc == pid.proc) return w.bridge;
         }
         return null;
     }
 
-    // warden-3cn
+    // warden-3cn, warden-dmg
     /// Spawn a new foreign worker as a child of parent_pid, return its PID.
     pub fn spawnWorkerUnder(
         self: *BridgeSupervisor,
@@ -677,16 +730,39 @@ pub const BridgeSupervisor = struct {
         log_dir: []const u8,
         storage_base: []const u8,
         parent_pid: ?Pid,
+        strategy: restart_mod.Strategy,
     ) !Pid {
+        const w = try self.allocator.create(ManagedWorker);
+        errdefer self.allocator.destroy(w);
+
+        const cmd_owned = try dupeCmd(self.allocator, cmd);
+        errdefer {
+            for (cmd_owned) |a| self.allocator.free(a);
+            self.allocator.free(cmd_owned);
+        }
+        const log_owned = try self.allocator.dupe(u8, log_dir);
+        errdefer self.allocator.free(log_owned);
+        const store_owned = try self.allocator.dupe(u8, storage_base);
+        errdefer self.allocator.free(store_owned);
+
         const bridge = try self.allocator.create(ForeignBridge);
         errdefer self.allocator.destroy(bridge);
-
         bridge.* = try ForeignBridge.initWithParent(self.allocator, self.runtime, cmd, log_dir, storage_base, parent_pid);
         errdefer bridge.deinit();
-
         try bridge.start(cmd);
-        try self.bridges.append(self.allocator, bridge);
 
+        w.* = .{
+            .bridge = bridge,
+            .cmd = cmd_owned,
+            .log_dir = log_owned,
+            .storage_base = store_owned,
+            .parent_pid = parent_pid,
+            .strategy = strategy,
+            .restart_timestamps = .empty,
+            .restart_count = 0,
+            .retired = false,
+        };
+        try self.workers.append(self.allocator, w);
         return bridge.pid;
     }
 };

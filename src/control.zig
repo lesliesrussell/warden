@@ -148,7 +148,7 @@ fn handleProcSpawn(
     const log_dir = cs.log_dir orelse "/tmp";
     const store_base = cs.store_base orelse "/tmp";
 
-    const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid);
+    const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid, .permanent);
 
     const pid_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ pid.beam, pid.proc });
     defer allocator.free(pid_str);

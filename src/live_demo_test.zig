@@ -96,6 +96,7 @@ test "live demo: topology and messaging" {
         log_path,
         store_path,
         sup_pid,
+        .permanent,
     );
 
     // spawn web_server as child of demo_supervisor
@@ -104,6 +105,7 @@ test "live demo: topology and messaging" {
         log_path,
         store_path,
         sup_pid,
+        .permanent,
     );
 
     // ── 1. verify both workers appear in proc.list ────────────────────────────
@@ -168,7 +170,7 @@ test "live demo: topology and messaging" {
             .body = .{ .integer = 10 },
         };
         // Find the math_worker bridge and deliver
-        try sup.bridges.items[0].deliver(fib_msg);
+        try sup.workers.items[0].bridge.deliver(fib_msg);
 
         // Poll for reply (res.ok) with up to 3s timeout
         var got_reply = false;
@@ -213,7 +215,7 @@ test "live demo: topology and messaging" {
             .reply_to = test_pid2_str,
             .body = .null,
         };
-        try sup.bridges.items[1].deliver(url_msg);
+        try sup.workers.items[1].bridge.deliver(url_msg);
 
         // Poll for reply
         var port_found: u16 = 0;
