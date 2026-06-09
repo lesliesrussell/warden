@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const sync = @import("sync.zig");
+// warden-dmg
+const clock = @import("clock.zig");
 const env = @import("env.zig");
 const beam_mod = @import("beam.zig");
 const types = @import("types.zig");
@@ -677,6 +679,9 @@ pub const BridgeSupervisor = struct {
     reaper_interval_ms: std.atomic.Value(u64),
     reaper_stopping: std.atomic.Value(bool),
     reaper_thread: ?std.Thread,
+    // warden-dmg: protects `workers` and per-worker `bridge` swaps against the
+    // reaper thread. The reader thread never takes it (no deadlock on join).
+    mutex: sync.Mutex,
 
     // warden-eet
     pub fn init(allocator: std.mem.Allocator, runtime: *Runtime) BridgeSupervisor {
@@ -688,14 +693,24 @@ pub const BridgeSupervisor = struct {
             .reaper_interval_ms = std.atomic.Value(u64).init(restart_mod.default_interval_ms),
             .reaper_stopping = std.atomic.Value(bool).init(false),
             .reaper_thread = null,
+            // warden-dmg
+            .mutex = .{},
         };
     }
 
     // warden-eet, warden-dmg
     pub fn deinit(self: *BridgeSupervisor) void {
+        // warden-dmg: stop the reaper first so it never races teardown.
+        self.reaper_stopping.store(true, .release);
+        if (self.reaper_thread) |t| {
+            t.join();
+            self.reaper_thread = null;
+        }
         for (self.workers.items) |w| {
-            w.bridge.deinit();
-            self.allocator.destroy(w.bridge);
+            if (!w.retired) {
+                w.bridge.deinit();
+                self.allocator.destroy(w.bridge);
+            }
             w.freeOwned(self.allocator);
             self.allocator.destroy(w);
         }
@@ -716,7 +731,10 @@ pub const BridgeSupervisor = struct {
     // warden-7oi, warden-dmg
     /// Return the bridge managing pid, or null if none.
     pub fn findBridge(self: *BridgeSupervisor, pid: Pid) ?*ForeignBridge {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         for (self.workers.items) |w| {
+            if (w.retired) continue;
             if (w.bridge.pid.beam == pid.beam and w.bridge.pid.proc == pid.proc) return w.bridge;
         }
         return null;
@@ -762,7 +780,116 @@ pub const BridgeSupervisor = struct {
             .restart_count = 0,
             .retired = false,
         };
-        try self.workers.append(self.allocator, w);
+        // warden-dmg
+        self.mutex.lock();
+        self.workers.append(self.allocator, w) catch |e| {
+            self.mutex.unlock();
+            return e;
+        };
+        self.mutex.unlock();
         return bridge.pid;
+    }
+
+    // warden-dmg: deliver a message to a foreign worker under the lock, so the
+    // reaper cannot free the bridge between lookup and use. Returns true if a
+    // live (non-retired) worker for `pid` was found.
+    pub fn deliver(self: *BridgeSupervisor, pid: Pid, msg: MessageEnvelope) !bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.workers.items) |w| {
+            if (w.retired) continue;
+            if (w.bridge.pid.beam == pid.beam and w.bridge.pid.proc == pid.proc) {
+                try w.bridge.deliver(msg);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // warden-dmg: adjust the reaper poll interval on the fly; returns the
+    // clamped value actually applied.
+    pub fn renice(self: *BridgeSupervisor, interval_ms: u64) u64 {
+        const v = restart_mod.clampInterval(interval_ms);
+        self.reaper_interval_ms.store(v, .release);
+        return v;
+    }
+
+    // warden-dmg: start the reaper. Call once after the supervisor is at its
+    // final (stable) address.
+    pub fn startReaper(self: *BridgeSupervisor) !void {
+        self.reaper_thread = try std.Thread.spawn(.{}, reaperLoop, .{self});
+    }
+
+    // warden-dmg: background loop — poll workers, respawn crashed ones.
+    fn reaperLoop(self: *BridgeSupervisor) void {
+        while (!self.reaper_stopping.load(.acquire)) {
+            const iv = self.reaper_interval_ms.load(.acquire);
+            clock.sleepNs(iv * std.time.ns_per_ms);
+            if (self.reaper_stopping.load(.acquire)) break;
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            for (self.workers.items) |w| {
+                if (w.retired) continue;
+                if (!w.bridge.crashed.load(.acquire)) continue;
+                self.reapAndMaybeRespawn(w) catch {};
+            }
+        }
+    }
+
+    // warden-dmg: tear down a crashed worker and respawn or retire per policy.
+    // MUST be called with self.mutex held (reaperLoop holds it).
+    fn reapAndMaybeRespawn(self: *BridgeSupervisor, w: *ManagedWorker) !void {
+        const old = w.bridge;
+        const old_pid = old.pid;
+
+        // Reap the dead incarnation (shutdown -> join reader -> close -> wait),
+        // which sets old.last_exit. stop() is idempotent and null-guarded.
+        old.stop() catch {};
+        const exit_class = old.last_exit;
+
+        const now = clock.nowMs();
+        const decision = try restart_mod.decide(
+            w.strategy, exit_class, &w.restart_timestamps, self.allocator, now,
+        );
+
+        if (decision == .retire) {
+            old.ctx.logger.note("info", "worker retired — not restarting", null) catch {};
+            self.runtime.registry.transition(old_pid, .exiting) catch {};
+            old.deinit();
+            self.allocator.destroy(old);
+            w.bridge = undefined; // never read again: w.retired gates it
+            w.retired = true;
+            return;
+        }
+
+        // Restart: tear down old, mark its registry entry exiting, spawn a new
+        // incarnation with a fresh PID.
+        self.runtime.registry.transition(old_pid, .exiting) catch {};
+        old.deinit();
+        self.allocator.destroy(old);
+
+        w.bridge = undefined; // old is freed; must be reassigned before any read
+
+        const nb = self.allocator.create(ForeignBridge) catch {
+            w.retired = true; // cannot respawn — retire so the reaper skips it
+            return;
+        };
+        nb.* = ForeignBridge.initWithParent(
+            self.allocator, self.runtime, w.cmd, w.log_dir, w.storage_base, w.parent_pid,
+        ) catch {
+            self.allocator.destroy(nb);
+            w.retired = true;
+            return;
+        };
+        nb.start(w.cmd) catch {
+            nb.deinit();
+            self.allocator.destroy(nb);
+            w.retired = true;
+            return;
+        };
+
+        w.bridge = nb;
+        w.restart_count += 1;
+        nb.ctx.logger.emit(.{ .restart = .{ .attempt = w.restart_count, .reason = "crash" } }, null) catch {};
     }
 };

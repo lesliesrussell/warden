@@ -100,6 +100,7 @@ fn handleBeamCreate(
     const sup = try cs.allocator.create(bridge_mod.BridgeSupervisor);
     errdefer cs.allocator.destroy(sup);
     sup.* = bridge_mod.BridgeSupervisor.init(cs.allocator, rt);
+    try sup.startReaper(); // warden-dmg
 
     try cs.runtimes.put(new_id, rt);
     try cs.supervisors.put(new_id, sup);
@@ -193,8 +194,7 @@ fn handleProcSend(
     };
 
     if (cs.supervisors.get(target.beam)) |sup| {
-        if (sup.findBridge(target)) |b| {
-            try b.deliver(msg);
+        if (try sup.deliver(target, msg)) { // warden-dmg
             const resp = try std.fmt.allocPrint(allocator,
                 "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":null}}",
                 .{req_id});
@@ -267,9 +267,7 @@ fn handleProcCall(
     };
 
     if (cs.supervisors.get(target.beam)) |sup| {
-        if (sup.findBridge(target)) |b| {
-            try b.deliver(msg);
-        } else {
+        if (!try sup.deliver(target, msg)) { // warden-dmg
             const mb_t = rt.getMailbox(target) orelse
                 return sendErrResp(cs.runtime.io, allocator, req_id, stream, "no mailbox for pid");
             _ = try mb_t.enqueue(msg);
@@ -940,6 +938,7 @@ pub const ControlServer = struct {
 
         const primary_sup = try allocator.create(bridge_mod.BridgeSupervisor);
         primary_sup.* = bridge_mod.BridgeSupervisor.init(allocator, runtime);
+        try primary_sup.startReaper(); // warden-dmg
         var supervisors = std.AutoHashMap(u32, *bridge_mod.BridgeSupervisor).init(allocator);
         errdefer {
             primary_sup.deinit();
