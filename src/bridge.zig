@@ -728,18 +728,6 @@ pub const BridgeSupervisor = struct {
         return self.spawnWorkerUnder(cmd, log_dir, storage_base, null, .permanent);
     }
 
-    // warden-7oi, warden-dmg
-    /// Return the bridge managing pid, or null if none.
-    pub fn findBridge(self: *BridgeSupervisor, pid: Pid) ?*ForeignBridge {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        for (self.workers.items) |w| {
-            if (w.retired) continue;
-            if (w.bridge.pid.beam == pid.beam and w.bridge.pid.proc == pid.proc) return w.bridge;
-        }
-        return null;
-    }
-
     // warden-3cn, warden-dmg
     /// Spawn a new foreign worker as a child of parent_pid, return its PID.
     pub fn spawnWorkerUnder(
