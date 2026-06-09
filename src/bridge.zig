@@ -175,6 +175,9 @@ fn readerThread(rc: ReaderCtx) void {
             // Log failure best-effort; continue.
         };
     }
+    // warden-dmg: if the loop ended while still "running", the worker died
+    // (socket drop / process exit) rather than being deliberately stopped.
+    if (self.running.load(.acquire)) self.crashed.store(true, .release);
 }
 
 // warden-eet
@@ -189,6 +192,11 @@ pub const ForeignBridge = struct {
     conn: ?std.Io.net.Stream,
     reader_thread: ?std.Thread,
     running: std.atomic.Value(bool),
+    // warden-dmg: set by the reader thread when the loop exits while still
+    // running (the worker died, not a deliberate stop). The reaper consumes it.
+    crashed: std.atomic.Value(bool),
+    // warden-dmg: how the child exited, classified from its Term during teardown.
+    last_exit: @import("restart.zig").ExitClass,
     ctx: Ctx,
     write_mutex: sync.Mutex,
     // warden-3cn: arena for reply message strings; freed on deinit
@@ -248,6 +256,8 @@ pub const ForeignBridge = struct {
             .conn = null,
             .reader_thread = null,
             .running = std.atomic.Value(bool).init(false),
+            .crashed = std.atomic.Value(bool).init(false),
+            .last_exit = .normal,
             .ctx = ctx,
             .write_mutex = .{},
             .msg_arena = std.heap.ArenaAllocator.init(allocator),
@@ -353,9 +363,16 @@ pub const ForeignBridge = struct {
             c.close(self.runtime.io);
             self.conn = null;
         }
-        // Wait for child process.
+        // warden-dmg: classify the exit so the reaper can apply transient policy.
         if (self.child_proc) |*child| {
-            _ = child.wait(self.runtime.io) catch {};
+            if (child.wait(self.runtime.io)) |term| {
+                self.last_exit = switch (term) {
+                    .exited => |code| if (code == 0) .normal else .abnormal,
+                    else => .abnormal, // signal / stopped / unknown
+                };
+            } else |_| {
+                self.last_exit = .abnormal;
+            }
             self.child_proc = null;
         }
     }
