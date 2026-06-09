@@ -112,6 +112,40 @@ fn handleBeamCreate(
     try writeFrame(cs.runtime.io, stream, resp);
 }
 
+// warden-dmg
+fn handleBeamReaper(
+    cs: *ControlServer,
+    allocator: std.mem.Allocator,
+    req_id: []const u8,
+    stream: std.Io.net.Stream,
+    payload_val: ?std.json.Value,
+) !void {
+    const pv = payload_val orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing payload");
+    if (pv != .object) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "payload must be object");
+    const obj = pv.object;
+
+    const beam_id: u32 = if (obj.get("beam")) |bv|
+        if (bv == .integer) @intCast(bv.integer) else cs.runtime.beam_id
+    else
+        cs.runtime.beam_id;
+
+    const interval_val = obj.get("interval_ms") orelse
+        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing interval_ms");
+    if (interval_val != .integer or interval_val.integer < 0)
+        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "interval_ms must be a non-negative integer");
+
+    const sup = cs.supervisors.get(beam_id) orelse
+        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
+
+    const applied = sup.renice(@intCast(interval_val.integer));
+
+    const resp = try std.fmt.allocPrint(allocator,
+        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"interval_ms\":{d}}}}}",
+        .{ req_id, applied });
+    defer allocator.free(resp);
+    try writeFrame(cs.runtime.io, stream, resp);
+}
+
 // warden-7oi
 fn handleProcSpawn(
     cs: *ControlServer,
@@ -149,7 +183,15 @@ fn handleProcSpawn(
     const log_dir = cs.log_dir orelse "/tmp";
     const store_base = cs.store_base orelse "/tmp";
 
-    const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid, .permanent);
+    // warden-dmg: optional per-worker restart policy (default permanent).
+    var strategy: @import("restart.zig").Strategy = .permanent;
+    if (obj.get("restart")) |rv| {
+        if (rv == .string) {
+            strategy = @import("restart.zig").Strategy.parse(rv.string) orelse
+                return sendErrResp(cs.runtime.io, allocator, req_id, stream, "invalid restart");
+        }
+    }
+    const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid, strategy);
 
     const pid_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ pid.beam, pid.proc });
     defer allocator.free(pid_str);
@@ -504,6 +546,9 @@ fn handleConnection(cs: *ControlServer, stream: std.Io.net.Stream) !void {
     if (std.mem.eql(u8, action, "beam.create")) {
         // warden-7oi
         try handleBeamCreate(cs, allocator, req_id, stream, payload_val);
+    } else if (std.mem.eql(u8, action, "beam.reaper")) {
+        // warden-dmg
+        try handleBeamReaper(cs, allocator, req_id, stream, payload_val);
     } else if (std.mem.eql(u8, action, "proc.spawn")) {
         // warden-7oi
         try handleProcSpawn(cs, allocator, req_id, stream, payload_val);
