@@ -3,8 +3,10 @@
 
 import asyncio
 import json
+import os
 import struct
 import unittest
+from unittest import mock
 
 from warden.aio import (
     Client,
@@ -48,6 +50,27 @@ class FramingTests(unittest.IsolatedAsyncioTestCase):
         reader.feed_data(_encode_frame(obj))
         reader.feed_eof()
         self.assertEqual(await _read_frame(reader), obj)
+
+
+class ResolvePathTests(unittest.TestCase):
+    def test_explicit_arg_wins_and_is_expanded(self):
+        self.assertEqual(_resolve_path("/tmp/x.sock"), "/tmp/x.sock")
+        self.assertEqual(
+            _resolve_path("~/y.sock"), os.path.expanduser("~/y.sock")
+        )
+
+    def test_env_var_used_when_arg_is_none(self):
+        with mock.patch.dict(os.environ, {"WARDEN_CTRL_SOCKET": "~/env.sock"}):
+            self.assertEqual(
+                _resolve_path(None), os.path.expanduser("~/env.sock")
+            )
+
+    def test_default_used_when_arg_none_and_env_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                _resolve_path(None),
+                os.path.expanduser("~/.warden/ctrl.sock"),
+            )
 
 
 if __name__ == "__main__":
