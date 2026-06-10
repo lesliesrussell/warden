@@ -124,15 +124,24 @@ class Client:
     async def _request(self, action: str, payload: Any) -> Any:
         async with self._lock:
             await self._ensure_connected()
+            # warden-4sx: capture the connection locally so a concurrent close()
+            # that nulls self._writer/_reader can't turn an in-flight write/read
+            # into an AttributeError. The request operates on its captured handles;
+            # a severed connection surfaces as a clean ConnectionError below.
+            writer = self._writer
+            reader = self._reader
+            if writer is None or reader is None:
+                self._connected = False
+                raise ConnectionError(f"warden client closed during {action!r}")
             self._counter += 1
             req_id = str(self._counter)
             frame = _encode_frame(
                 {"req_id": req_id, "action": action, "payload": payload}
             )
             try:
-                self._writer.write(frame)
-                await self._writer.drain()
-                resp = await _read_frame(self._reader)
+                writer.write(frame)
+                await writer.drain()
+                resp = await _read_frame(reader)
             except (ConnectionError, asyncio.IncompleteReadError, OSError) as exc:
                 self._connected = False
                 raise ConnectionError(

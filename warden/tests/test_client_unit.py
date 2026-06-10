@@ -475,3 +475,35 @@ class PackageExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# warden-4sx
+class CloseRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_during_inflight_request_does_not_crash(self):
+        # A request parked mid-flight (in drain) must survive a concurrent
+        # close() that nulls self._writer/_reader — it operates on captured
+        # handles, so no AttributeError; the queued response still resolves.
+        import asyncio
+
+        gate = asyncio.Event()
+
+        class GatedWriter(_FakeWriter):
+            async def drain(self):
+                await gate.wait()
+
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"v": 1}}
+        )
+        writer = GatedWriter()
+
+        async def connector(path):
+            return reader, writer
+
+        client = await Client.connect("/tmp/ignored.sock", _connector=connector)
+        task = asyncio.create_task(client._request("proc.list", {}))
+        await asyncio.sleep(0)  # let the request reach the drain await
+        # race a close() in: nulls self._writer/_reader while the request is parked
+        await client.close()
+        gate.set()  # unblock drain; request resumes on its captured handles
+        result = await task
+        self.assertEqual(result, {"v": 1})
