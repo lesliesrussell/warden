@@ -56,3 +56,57 @@ export function resolvePath(p?: string): string {
   const raw = p ?? process.env.WARDEN_CTRL_SOCKET ?? DEFAULT_SOCKET;
   return expandHome(raw);
 }
+
+// warden-3yd
+export type Opener = () => Promise<net.Socket>;
+
+interface RetryClock {
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+export async function connectWithRetry(
+  open: Opener,
+  opts: { timeoutMs?: number } & RetryClock = {},
+): Promise<net.Socket> {
+  const sleep = opts.sleep ?? defaultSleep;
+  const now = opts.now ?? Date.now;
+  const deadline = opts.timeoutMs == null ? null : now() + opts.timeoutMs;
+  let delay = RETRY_INITIAL_MS;
+  for (;;) {
+    try {
+      return await open();
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ECONNREFUSED") throw err;
+      if (deadline != null && now() >= deadline) {
+        throw new WardenUnavailable(
+          `warden daemon not reachable within ${opts.timeoutMs}ms`,
+        );
+      }
+      await sleep(delay);
+      delay = Math.min(delay * 2, RETRY_CAP_MS);
+    }
+  }
+}
+
+// warden-3yd
+// Open a Unix-domain stream socket; rejects with the ENOENT/ECONNREFUSED that
+// connectWithRetry treats as "daemon not up yet".
+export function openUnixSocket(sockPath: string): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const sock = net.createConnection({ path: sockPath });
+    const onConnect = () => {
+      sock.off("error", onError);
+      resolve(sock);
+    };
+    const onError = (err: Error) => {
+      sock.off("connect", onConnect);
+      reject(err);
+    };
+    sock.once("connect", onConnect);
+    sock.once("error", onError);
+  });
+}
