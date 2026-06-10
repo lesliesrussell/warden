@@ -292,18 +292,19 @@ fn handleProcCall(
         return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
 
     const caller_pid = try rt.registry.spawn(.native_worker, null, .{});
-    try rt.allocMailbox(caller_pid, .{});
     // warden-hiz: reclaim the ephemeral caller pid + mailbox on every exit path
-    // (reply found, timeout, or delivery error). This defer runs only after the
-    // function returns, so the receive loop below still has caller_pid's mailbox;
-    // a late reply arriving after cleanup is dropped safely (tryDeliverMailbox and
-    // freeMailbox share mailboxes_mutex).
+    // (reply found, timeout, or delivery error). Registered right after spawn so a
+    // failing allocMailbox is also covered (freeMailbox no-ops if absent). Runs
+    // only after the function returns, so the receive loop below still has
+    // caller_pid's mailbox; a late reply after cleanup is dropped safely
+    // (tryDeliverMailbox and freeMailbox share mailboxes_mutex).
     defer {
         rt.registry.transition(caller_pid, .exiting) catch {};
         rt.registry.transition(caller_pid, .dead) catch {};
         rt.registry.remove(caller_pid) catch {};
         rt.freeMailbox(caller_pid);
     }
+    try rt.allocMailbox(caller_pid, .{});
 
     const caller_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ caller_pid.beam, caller_pid.proc });
     defer allocator.free(caller_str);
