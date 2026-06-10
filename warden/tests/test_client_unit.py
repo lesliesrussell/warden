@@ -278,5 +278,104 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["n"], 2)
 
 
+# warden-09k
+class VerbTests(unittest.IsolatedAsyncioTestCase):
+    async def test_beam_create_default_payload_and_return(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"beam_id": 4}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        self.assertEqual(await client.beam_create(), 4)
+        self.assertEqual(_sent_requests(writer)[0]["payload"], {})
+
+    async def test_beam_create_with_explicit_beam(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"beam_id": 9}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        self.assertEqual(await client.beam_create(beam=9), 9)
+        self.assertEqual(_sent_requests(writer)[0]["payload"], {"beam": 9})
+
+    async def test_proc_spawn_builds_payload_and_returns_pid(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"pid": "2/5"}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        pid = await client.proc_spawn(
+            ["python3", "w.py"], beam=2, parent="2/1", restart="permanent"
+        )
+        self.assertEqual(pid, "2/5")
+        sent = _sent_requests(writer)[0]
+        self.assertEqual(sent["action"], "proc.spawn")
+        self.assertEqual(
+            sent["payload"],
+            {"cmd": ["python3", "w.py"], "beam": 2, "parent": "2/1", "restart": "permanent"},
+        )
+
+    async def test_proc_spawn_omits_unset_optionals(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"pid": "1/3"}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        await client.proc_spawn(["echo", "hi"])
+        self.assertEqual(_sent_requests(writer)[0]["payload"], {"cmd": ["echo", "hi"]})
+
+    async def test_proc_spawn_bad_restart_raises_before_io(self):
+        reader = asyncio.StreamReader()  # no response queued — proves no I/O
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        with self.assertRaises(ValueError):
+            await client.proc_spawn(["echo"], restart="bogus")
+        self.assertEqual(len(writer.buffer), 0)
+
+    async def test_proc_send_returns_none(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": None}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        self.assertIsNone(await client.proc_send("1/2", "req.ping", {"x": 1}))
+        sent = _sent_requests(writer)[0]
+        self.assertEqual(sent["action"], "proc.send")
+        self.assertEqual(
+            sent["payload"], {"pid": "1/2", "type": "req.ping", "body": {"x": 1}}
+        )
+
+    async def test_proc_call_returns_type_and_body(self):
+        reader = _reader_with(
+            {
+                "req_id": "1",
+                "ok": True,
+                "error": None,
+                "payload": {"type": "res.ok", "body": 55},
+            }
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        reply = await client.proc_call("1/2", "req.fib", 10, timeout_ms=2000)
+        self.assertEqual(reply, {"type": "res.ok", "body": 55})
+        sent = _sent_requests(writer)[0]
+        self.assertEqual(sent["action"], "proc.call")
+        self.assertEqual(
+            sent["payload"],
+            {"pid": "1/2", "type": "req.fib", "body": 10, "timeout_ms": 2000},
+        )
+
+    async def test_proc_list_returns_processes_array(self):
+        procs = [{"pid": "1/2", "kind": "foreign", "state": "running",
+                  "policy": "permanent", "last_active_ms": 12}]
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"processes": procs}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        self.assertEqual(await client.proc_list(beam=1), procs)
+        self.assertEqual(_sent_requests(writer)[0]["payload"], {"beam": 1})
+
+
 if __name__ == "__main__":
     unittest.main()

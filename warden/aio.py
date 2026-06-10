@@ -138,6 +138,54 @@ class Client:
                 raise WardenError(resp.get("error") or "unknown error")
             return resp.get("payload")
 
+    # warden-09k
+    async def beam_create(self, beam: int | None = None) -> int:
+        payload = {} if beam is None else {"beam": beam}
+        result = await self._request("beam.create", payload)
+        return result["beam_id"]
+
+    async def proc_spawn(
+        self,
+        cmd,
+        *,
+        beam: int | None = None,
+        parent: str | None = None,
+        restart: str | None = None,
+    ) -> str:
+        if restart is not None and restart not in _VALID_RESTART:
+            raise ValueError(
+                f"invalid restart policy {restart!r}; "
+                f"expected one of {_VALID_RESTART}"
+            )
+        payload: dict[str, Any] = {"cmd": list(cmd)}
+        if beam is not None:
+            payload["beam"] = beam
+        if parent is not None:
+            payload["parent"] = parent
+        if restart is not None:
+            payload["restart"] = restart
+        result = await self._request("proc.spawn", payload)
+        return result["pid"]
+
+    async def proc_send(self, pid: str, msg_type: str, body: Any) -> None:
+        await self._request(
+            "proc.send", {"pid": pid, "type": msg_type, "body": body}
+        )
+        return None
+
+    async def proc_call(
+        self, pid: str, msg_type: str, body: Any, *, timeout_ms: int = 5000
+    ) -> dict:
+        return await self._request(
+            "proc.call",
+            {"pid": pid, "type": msg_type, "body": body, "timeout_ms": timeout_ms},
+        )
+
+    async def proc_list(self, beam: int | None = None) -> list:
+        payload = {} if beam is None else {"beam": beam}
+        result = await self._request("proc.list", payload)
+        return result["processes"]
+
     async def close(self) -> None:
         if self._writer is not None:
             self._writer.close()
