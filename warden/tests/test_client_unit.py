@@ -407,5 +407,17 @@ class VerbTests(unittest.IsolatedAsyncioTestCase):
             await client.beam_create()
 
 
+# warden-09k
+class PackageExportTests(unittest.TestCase):
+    def test_client_and_errors_exported_from_warden(self):
+        import warden
+
+        self.assertIs(warden.Client, Client)
+        self.assertIs(warden.WardenError, WardenError)
+        self.assertIs(warden.WardenUnavailable, WardenUnavailable)
+        for name in ("Client", "WardenError", "WardenUnavailable"):
+            self.assertIn(name, warden.__all__)
+
+
 if __name__ == "__main__":
     unittest.main()

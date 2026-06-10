@@ -5,4 +5,15 @@ from .client import BeamCtx
 from .decorators import tool
 from .loop import run_loop
 
-__all__ = ["BeamCtx", "tool", "run_loop"]
+# warden-09k
+from .aio import Client, WardenError, WardenUnavailable
+
+__all__ = [
+    "BeamCtx",
+    "tool",
+    "run_loop",
+    # warden-09k
+    "Client",
+    "WardenError",
+    "WardenUnavailable",
+]
