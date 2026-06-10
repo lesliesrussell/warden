@@ -87,7 +87,7 @@ class Client:
         self._path = path
         self._connector = _connector  # test seam: async (path) -> (reader, writer)
         self._reader: asyncio.StreamReader | None = None
-        self._writer = None
+        self._writer: asyncio.StreamWriter | None = None
         self._counter = 0
         self._connected = False
         self._lock = asyncio.Lock()
@@ -129,6 +129,8 @@ class Client:
                     f"warden connection lost during {action!r}"
                 ) from exc
             if resp.get("req_id") != req_id:
+                # stream is desynchronized — force a reconnect on the next call
+                self._connected = False
                 raise WardenError(
                     f"req_id mismatch: sent {req_id}, got {resp.get('req_id')!r}"
                 )

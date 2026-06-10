@@ -254,6 +254,29 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(writer.closed)
         await client.close()  # second close must not raise
 
+    async def test_reconnect_after_drop_succeeds(self):
+        # First connection drops (EOF before any response); second serves a reply.
+        dropped = asyncio.StreamReader()
+        dropped.feed_eof()
+        good = _reader_with(
+            {"req_id": "2", "ok": True, "error": None, "payload": {"beam_id": 5}}
+        )
+        writer = _FakeWriter()
+        calls = {"n": 0}
+
+        async def connector(path):
+            calls["n"] += 1
+            return (dropped, writer) if calls["n"] == 1 else (good, writer)
+
+        client = await Client.connect("/tmp/ignored.sock", _connector=connector)
+        with self.assertRaises(ConnectionError):
+            await client._request("proc.list", {})
+        self.assertFalse(client._connected)
+        # next call transparently reconnects (connector invoked again) and succeeds
+        payload = await client._request("beam.create", {})
+        self.assertEqual(payload, {"beam_id": 5})
+        self.assertEqual(calls["n"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
