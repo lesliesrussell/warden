@@ -113,3 +113,148 @@ export function openUnixSocket(sockPath: string): Promise<net.Socket> {
     sock.once("error", onError);
   });
 }
+
+// warden-3yd
+// Read exactly one length-prefixed JSON frame from a client socket, accumulating
+// chunks until the full frame arrives. Rejects if the socket closes/errs first.
+function readOneFrame(sock: net.Socket): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let buf = Buffer.alloc(0);
+    let need = -1;
+    const onData = (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (need < 0 && buf.length >= 4) need = buf.readUInt32BE(0);
+      if (need >= 0 && buf.length >= 4 + need) {
+        cleanup();
+        try {
+          resolve(decodeBody(buf.subarray(4, 4 + need)));
+        } catch (e) {
+          reject(e);
+        }
+      }
+    };
+    const onErr = (e: Error) => {
+      cleanup();
+      reject(e);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("warden: connection closed before a full response frame"));
+    };
+    const cleanup = () => {
+      sock.off("data", onData);
+      sock.off("error", onErr);
+      sock.off("close", onClose);
+    };
+    sock.on("data", onData);
+    sock.on("error", onErr);
+    sock.on("close", onClose);
+  });
+}
+
+export interface ConnectOptions {
+  path?: string;
+  /** Max seconds to wait for the daemon (undefined = forever). */
+  timeout?: number;
+  /** Test seam: override how a socket is opened. */
+  _open?: Opener;
+}
+
+// warden-3yd
+export class Warden {
+  #path: string;
+  #opener: Opener;
+  #sock: net.Socket | null = null;
+  #connected = false;
+  #counter = 0;
+  // promise-chain mutex: each request waits for the previous to settle.
+  #tail: Promise<unknown> = Promise.resolve();
+
+  private constructor(sockPath: string, opener: Opener) {
+    this.#path = sockPath;
+    this.#opener = opener;
+  }
+
+  static async connect(opts: ConnectOptions = {}): Promise<Warden> {
+    const sockPath = resolvePath(opts.path);
+    const opener = opts._open ?? (() => openUnixSocket(sockPath));
+    const c = new Warden(sockPath, opener);
+    await c.#ensureConnected(opts.timeout);
+    return c;
+  }
+
+  async #ensureConnected(timeoutSec?: number): Promise<void> {
+    if (this.#connected && this.#sock) return;
+    if (this.#sock) {
+      this.#sock.destroy();
+      this.#sock = null;
+    }
+    const timeoutMs = timeoutSec == null ? undefined : timeoutSec * 1000;
+    this.#sock = await connectWithRetry(this.#opener, { timeoutMs });
+    this.#connected = true;
+  }
+
+  #markDisconnected(): void {
+    this.#connected = false;
+    if (this.#sock) {
+      this.#sock.destroy();
+      this.#sock = null;
+    }
+  }
+
+  #writeAll(frame: Buffer): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.#sock!.write(frame, (err) => (err ? reject(err) : resolve()));
+    });
+  }
+
+  // Serialize: chain onto #tail so only one request runs at a time, regardless
+  // of whether the previous one resolved or rejected.
+  #runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.#tail.then(fn, fn);
+    this.#tail = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
+  }
+
+  /** @internal - exposed for tests; verb methods are the public surface. */
+  request(action: string, payload: unknown): Promise<any> {
+    return this.#runExclusive(async () => {
+      await this.#ensureConnected();
+      this.#counter += 1;
+      const reqId = String(this.#counter);
+      const frame = encodeFrame({ req_id: reqId, action, payload });
+      let resp: any;
+      try {
+        await this.#writeAll(frame);
+        resp = await readOneFrame(this.#sock!);
+      } catch (err) {
+        this.#markDisconnected();
+        throw new Error(
+          `warden connection lost during '${action}': ${(err as Error).message}`,
+        );
+      }
+      // one-shot protocol: the daemon closes the socket after this response.
+      this.#markDisconnected();
+      if (resp.req_id !== reqId) {
+        throw new WardenError(
+          `req_id mismatch: sent ${reqId}, got ${JSON.stringify(resp.req_id)}`,
+        );
+      }
+      if (!resp.ok) {
+        throw new WardenError(resp.error ?? "unknown error");
+      }
+      return resp.payload;
+    });
+  }
+
+  async close(): Promise<void> {
+    this.#markDisconnected();
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close();
+  }
+}
