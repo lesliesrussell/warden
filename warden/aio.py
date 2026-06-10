@@ -108,6 +108,13 @@ class Client:
     async def _ensure_connected(self, *, timeout: float | None = None) -> None:
         if self._connected:
             return
+        # warden-09k: close any stale connection from a prior request before
+        # reconnecting (one-shot protocol reconnects every request).
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except (ConnectionError, OSError):
+                pass
         reader, writer = await _connect_with_retry(self._open, timeout=timeout)
         self._reader, self._writer, self._connected = reader, writer, True
 

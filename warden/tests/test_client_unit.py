@@ -277,6 +277,22 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload, {"beam_id": 5})
         self.assertEqual(calls["n"], 2)
 
+    # warden-09k
+    async def test_reconnect_closes_stale_writer(self):
+        w1, w2 = _FakeWriter(), _FakeWriter()
+        r1 = _reader_with({"req_id": "1", "ok": True, "error": None, "payload": {}})
+        r2 = _reader_with({"req_id": "2", "ok": True, "error": None, "payload": {}})
+        pairs = [(r1, w1), (r2, w2)]
+
+        async def connector(path):
+            return pairs.pop(0)
+
+        client = await Client.connect("/tmp/ignored.sock", _connector=connector)
+        await client._request("proc.list", {})   # uses (r1, w1)
+        await client._request("proc.list", {})   # reconnects to (r2, w2)
+        self.assertTrue(w1.closed)                # stale writer closed
+        self.assertFalse(w2.closed)               # current writer still open
+
 
 # warden-09k
 class VerbTests(unittest.IsolatedAsyncioTestCase):
