@@ -7,8 +7,9 @@ spawn / message supervised workers. Wire-compatible with the Python
 
 ## Requirements
 
-- Node ≥ 20 (uses `node:net`, `node:test`, and native TypeScript type-stripping).
+- Node ≥ 22.6 (uses `node:net`, `node:test`, and native TypeScript type-stripping; flagless on ≥ 22.18).
 - No runtime dependencies.
+- Distributed as TypeScript source (no build step) — consume under a Node with type-stripping or a TS-aware bundler/loader.
 
 ## Usage
 
@@ -29,7 +30,7 @@ try {
   await w.close();
 }
 
-// Or with explicit resource management (Node ≥ 20):
+// Or with explicit resource management (Node ≥ 22.6):
 await using c = await Warden.connect();
 ```
 

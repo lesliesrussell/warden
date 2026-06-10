@@ -435,3 +435,64 @@ test("malformed response (missing key) raises WardenError", async () => {
     await c.close();
   });
 });
+
+// warden-3yd
+test("one-shot: each request opens a fresh connection", async () => {
+  let connections = 0;
+  const dir = fs.mkdtempSync(path2.join(os2.tmpdir(), "warden-reuse-"));
+  const sockPath = path2.join(dir, "ctrl.sock");
+  const server = netReal.createServer((sock) => {
+    connections += 1;
+    readServerFrame(sock)
+      .then((req) =>
+        sock.end(encodeFrame({ req_id: req.req_id, ok: true, error: null, payload: {} })),
+      )
+      .catch(() => sock.destroy());
+  });
+  await new Promise<void>((r) => server.listen(sockPath, () => r()));
+  try {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    await (c as any).request("a", {});
+    await (c as any).request("b", {});
+    await (c as any).request("c", {});
+    assert.equal(connections, 3); // connect's socket serves req a, then b & c reconnect
+    await c.close();
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("close() during an in-flight request rejects it cleanly and the client recovers", async () => {
+  let firstSock: any = null;
+  const dir = fs.mkdtempSync(path2.join(os2.tmpdir(), "warden-closeflight-"));
+  const sockPath = path2.join(dir, "ctrl.sock");
+  const server = netReal.createServer((sock) => {
+    if (firstSock === null) {
+      firstSock = sock; // never respond to the first connection
+      return;
+    }
+    readServerFrame(sock)
+      .then((req) =>
+        sock.end(
+          encodeFrame({ req_id: req.req_id, ok: true, error: null, payload: { ok: 2 } }),
+        ),
+      )
+      .catch(() => sock.destroy());
+  });
+  await new Promise<void>((r) => server.listen(sockPath, () => r()));
+  const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  try {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    const inflight = (c as any).request("a", {}); // hangs (server never responds)
+    await wait(50); // let it reach readOneFrame
+    await c.close(); // destroys the captured socket
+    await assert.rejects(inflight); // in-flight request rejects, no crash
+    const r = await (c as any).request("b", {}); // recovers on a fresh connection
+    assert.deepEqual(r, { ok: 2 });
+  } finally {
+    if (firstSock) firstSock.destroy(); // never-answered socket would block server.close()
+    await new Promise<void>((r) => server.close(() => r()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
