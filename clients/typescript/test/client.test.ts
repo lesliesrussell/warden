@@ -309,3 +309,129 @@ test("close() is idempotent", async () => {
     await c.close(); // must not throw
   });
 });
+
+// warden-3yd
+test("beamCreate: default payload {} and returns beam_id", async () => {
+  await withFakeDaemon(okEcho({ beam_id: 4 }), async (sockPath, requests) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    assert.equal(await c.beamCreate(), 4);
+    assert.deepEqual(requests[0].payload, {});
+    await c.close();
+  });
+});
+
+test("beamCreate: explicit beam in payload", async () => {
+  await withFakeDaemon(okEcho({ beam_id: 9 }), async (sockPath, requests) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    assert.equal(await c.beamCreate(9), 9);
+    assert.deepEqual(requests[0].payload, { beam: 9 });
+    await c.close();
+  });
+});
+
+test("procSpawn: builds payload, returns pid", async () => {
+  await withFakeDaemon(okEcho({ pid: "2/5" }), async (sockPath, requests) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    const pid = await c.procSpawn(["python3", "w.py"], {
+      beam: 2,
+      parent: "2/1",
+      restart: "permanent",
+    });
+    assert.equal(pid, "2/5");
+    assert.equal(requests[0].action, "proc.spawn");
+    assert.deepEqual(requests[0].payload, {
+      cmd: ["python3", "w.py"],
+      beam: 2,
+      parent: "2/1",
+      restart: "permanent",
+    });
+    await c.close();
+  });
+});
+
+test("procSpawn: omits unset optionals; string cmd becomes single element", async () => {
+  await withFakeDaemon(okEcho({ pid: "1/3" }), async (sockPath, requests) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    await c.procSpawn("worker.py");
+    assert.deepEqual(requests[0].payload, { cmd: ["worker.py"] });
+    await c.close();
+  });
+});
+
+test("procSpawn: bad restart throws TypeError before any I/O", async () => {
+  await withFakeDaemon(okEcho({}), async (sockPath, requests) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    await assert.rejects(
+      // @ts-expect-error intentionally invalid value
+      c.procSpawn(["echo"], { restart: "bogus" }),
+      TypeError,
+    );
+    assert.equal(requests.length, 0); // nothing sent
+    await c.close();
+  });
+});
+
+test("procSend: returns void; payload uses wire field 'type'", async () => {
+  await withFakeDaemon(okEcho(null), async (sockPath, requests) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    const r = await c.procSend("1/2", "req.ping", { x: 1 });
+    assert.equal(r, undefined);
+    assert.equal(requests[0].action, "proc.send");
+    assert.deepEqual(requests[0].payload, {
+      pid: "1/2",
+      type: "req.ping",
+      body: { x: 1 },
+    });
+    await c.close();
+  });
+});
+
+test("procCall: returns {type, body}; default timeout_ms 5000", async () => {
+  await withFakeDaemon(
+    okEcho({ type: "res.ok", body: 55 }),
+    async (sockPath, requests) => {
+      const c = await Warden.connect({ path: sockPath, timeout: 5 });
+      const reply = await c.procCall("1/2", "req.fib", 10);
+      assert.deepEqual(reply, { type: "res.ok", body: 55 });
+      assert.deepEqual(requests[0].payload, {
+        pid: "1/2",
+        type: "req.fib",
+        body: 10,
+        timeout_ms: 5000,
+      });
+      await c.close();
+    },
+  );
+});
+
+test("procCall: explicit timeoutMs flows to wire timeout_ms", async () => {
+  await withFakeDaemon(
+    okEcho({ type: "res.ok", body: 1 }),
+    async (sockPath, requests) => {
+      const c = await Warden.connect({ path: sockPath, timeout: 5 });
+      await c.procCall("1/2", "req.x", null, { timeoutMs: 2000 });
+      assert.equal(requests[0].payload.timeout_ms, 2000);
+      await c.close();
+    },
+  );
+});
+
+test("procList: returns processes array; passes beam filter", async () => {
+  const procs = [
+    { beam: 1, pid: 2, kind: "foreign", state: "running", policy: "permanent", last_active_ms: 12 },
+  ];
+  await withFakeDaemon(okEcho({ processes: procs }), async (sockPath, requests) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    assert.deepEqual(await c.procList(1), procs);
+    assert.deepEqual(requests[0].payload, { beam: 1 });
+    await c.close();
+  });
+});
+
+test("malformed response (missing key) raises WardenError", async () => {
+  await withFakeDaemon(okEcho({}), async (sockPath) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    await assert.rejects(c.beamCreate(), WardenError); // payload {} has no beam_id
+    await c.close();
+  });
+});

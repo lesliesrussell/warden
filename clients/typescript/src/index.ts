@@ -260,6 +260,67 @@ export class Warden {
     });
   }
 
+  // warden-3yd
+  #field<T>(result: any, key: string, action: string): T {
+    if (result == null || typeof result !== "object" || !(key in result)) {
+      throw new WardenError(
+        `${action}: malformed response, missing '${key}': ${JSON.stringify(result)}`,
+      );
+    }
+    return result[key] as T;
+  }
+
+  async beamCreate(beam?: number): Promise<number> {
+    const payload = beam == null ? {} : { beam };
+    const result = await this.request("beam.create", payload);
+    return this.#field<number>(result, "beam_id", "beam.create");
+  }
+
+  async procSpawn(
+    cmd: string | string[],
+    opts: { beam?: number; parent?: string; restart?: RestartPolicy } = {},
+  ): Promise<string> {
+    const { beam, parent, restart } = opts;
+    if (restart != null && !VALID_RESTART.includes(restart)) {
+      throw new TypeError(
+        `invalid restart policy ${JSON.stringify(restart)}; ` +
+          `expected one of ${JSON.stringify(VALID_RESTART)}`,
+      );
+    }
+    const cmdArr = typeof cmd === "string" ? [cmd] : [...cmd];
+    const payload: Record<string, unknown> = { cmd: cmdArr };
+    if (beam != null) payload.beam = beam;
+    if (parent != null) payload.parent = parent;
+    if (restart != null) payload.restart = restart;
+    const result = await this.request("proc.spawn", payload);
+    return this.#field<string>(result, "pid", "proc.spawn");
+  }
+
+  async procSend(pid: string, msgType: string, body: unknown): Promise<void> {
+    await this.request("proc.send", { pid, type: msgType, body });
+  }
+
+  async procCall(
+    pid: string,
+    msgType: string,
+    body: unknown,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<{ type: string; body: unknown }> {
+    const timeout_ms = opts.timeoutMs ?? 5000;
+    return (await this.request("proc.call", {
+      pid,
+      type: msgType,
+      body,
+      timeout_ms,
+    })) as { type: string; body: unknown };
+  }
+
+  async procList(beam?: number): Promise<any[]> {
+    const payload = beam == null ? {} : { beam };
+    const result = await this.request("proc.list", payload);
+    return this.#field<any[]>(result, "processes", "proc.list");
+  }
+
   async close(): Promise<void> {
     this.#markDisconnected();
   }
