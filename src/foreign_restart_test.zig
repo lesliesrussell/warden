@@ -113,3 +113,66 @@ test "permanent worker respawns with a new pid after a crash" {
     }
     try std.testing.expect(respawned);
 }
+
+// warden-47g
+test "reaper reclaims the old incarnation's registry entry + mailbox after restart" {
+    const allocator = std.testing.allocator;
+
+    if (std.process.run(allocator, std.testing.io, .{
+        .argv = &.{ "python3", "--version" },
+    })) |res| {
+        allocator.free(res.stdout);
+        allocator.free(res.stderr);
+    } else |_| {
+        return error.SkipZigTest;
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var base_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try testutil.tmpAbs(&base_buf, &tmp);
+
+    const script = try writeScript(allocator, base, "crash2.py", crash_on_msg);
+    defer allocator.free(script);
+
+    const rt = try beam.Runtime.init(allocator, 78);
+    defer rt.destroy();
+
+    var sup = bridge.BridgeSupervisor.init(allocator, rt);
+    sup.reclaim_grace_ms = 0; // reclaim terminal entries on the next reaper cycle
+    try sup.startReaper();
+    defer sup.deinit();
+    _ = sup.renice(10);
+
+    const cmd = [_][]const u8{ "python3", script };
+    const pid1 = sup.spawnWorkerUnder(&cmd, base, base, null, .permanent) catch return error.SkipZigTest;
+    // The bridge allocated a registry entry + mailbox for pid1.
+    try std.testing.expect(rt.getMailbox(pid1) != null);
+
+    _ = try sup.deliver(pid1, .{
+        .kind = .request,
+        .@"type" = "go",
+        .id = "1",
+        .from = "test",
+        .to = "x",
+        .body = .null,
+    });
+
+    // After the crash the reaper respawns with a new pid AND (grace=0) reclaims
+    // the old incarnation's registry entry + mailbox on a subsequent cycle.
+    var reclaimed = false;
+    var i: usize = 0;
+    while (i < 500) : (i += 1) {
+        sleepMs(10);
+        if (currentPid(&sup)) |cur| {
+            if (cur.proc != pid1.proc and
+                rt.registry.lookup(pid1) == null and
+                rt.getMailbox(pid1) == null)
+            {
+                reclaimed = true;
+                break;
+            }
+        }
+    }
+    try std.testing.expect(reclaimed);
+}

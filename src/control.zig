@@ -322,6 +322,9 @@ fn handleProcCall(
     const max_attempts: u32 = @intCast(timeout_ms / 10 + 1);
     var attempts: u32 = 0;
     while (attempts < max_attempts) : (attempts += 1) {
+        // warden-47g: caller_pid is an ephemeral native pid that is never
+        // transitioned to terminal, so reclaimTerminal never frees its mailbox
+        // — this getMailbox+use-after-unlock is safe only under that invariant.
         const mb = rt.getMailbox(caller_pid) orelse break;
         if (mb.receive(matchAny)) |reply| {
             var body_buf: std.Io.Writer.Allocating = .init(allocator);
