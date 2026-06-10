@@ -246,9 +246,10 @@ fn handleProcSend(
     }
     const rt = cs.runtimes.get(target.beam) orelse
         return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
-    const mb = rt.getMailbox(target) orelse
+    // warden-47g: deliver under the mailbox lock so a reaper reclaim can't free
+    // the mailbox between lookup and enqueue.
+    if (!try rt.tryDeliverMailbox(target, msg))
         return sendErrResp(cs.runtime.io, allocator, req_id, stream, "no mailbox for pid");
-    _ = try mb.enqueue(msg);
     const resp = try std.fmt.allocPrint(allocator,
         "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":null}}",
         .{req_id});
@@ -310,9 +311,9 @@ fn handleProcCall(
 
     if (cs.supervisors.get(target.beam)) |sup| {
         if (!try sup.deliver(target, msg)) { // warden-dmg
-            const mb_t = rt.getMailbox(target) orelse
+            // warden-47g: deliver under the mailbox lock (reclaim-safe).
+            if (!try rt.tryDeliverMailbox(target, msg))
                 return sendErrResp(cs.runtime.io, allocator, req_id, stream, "no mailbox for pid");
-            _ = try mb_t.enqueue(msg);
         }
     } else {
         return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");

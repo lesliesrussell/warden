@@ -174,6 +174,57 @@ pub const Runtime = struct {
         defer self.mailboxes_mutex.unlock();
         return self.mailboxes.get(pid.proc);
     }
+
+    // warden-47g: enqueue a message to a pid's mailbox while holding
+    // mailboxes_mutex, so a concurrent freeMailbox cannot free it mid-enqueue.
+    // Returns false if no mailbox exists for the pid.
+    pub fn tryDeliverMailbox(self: *Runtime, pid: Pid, msg: MessageEnvelope) !bool {
+        self.mailboxes_mutex.lock();
+        defer self.mailboxes_mutex.unlock();
+        const mb = self.mailboxes.get(pid.proc) orelse return false;
+        _ = try mb.enqueue(msg);
+        return true;
+    }
+
+    // warden-47g: remove and free a pid's mailbox under mailboxes_mutex. Safe
+    // against concurrent delivery because tryDeliverMailbox holds the same lock.
+    pub fn freeMailbox(self: *Runtime, pid: Pid) void {
+        self.mailboxes_mutex.lock();
+        defer self.mailboxes_mutex.unlock();
+        if (self.mailboxes.fetchRemove(pid.proc)) |kv| {
+            kv.value.deinit();
+            self.allocator.destroy(kv.value);
+        }
+    }
+
+    // warden-47g: reclaim terminal (.exiting/.dead) registry entries that have
+    // been idle past grace_ms, freeing their mailboxes. Bounds registry/mailbox
+    // growth under restart churn and normal-exit accumulation. Bounded per call
+    // (caps at 64 reclaims); the reaper invokes it each cycle so a backlog drains
+    // over successive cycles.
+    pub fn reclaimTerminal(self: *Runtime, grace_ms: u64, now_ms: i64) void {
+        var buf: [64]Pid = undefined;
+        var n: usize = 0;
+        self.registry.mutex.lock();
+        var it = self.registry.map.iterator();
+        while (it.next()) |kv| {
+            const e = kv.value_ptr.*;
+            if (e.state != .exiting and e.state != .dead) continue;
+            if (now_ms - e.last_active_at < @as(i64, @intCast(grace_ms))) continue;
+            buf[n] = e.pid;
+            n += 1;
+            if (n == buf.len) break;
+        }
+        self.registry.mutex.unlock();
+
+        for (buf[0..n]) |pid| {
+            // .exiting -> .dead so remove() accepts it; an already-.dead entry's
+            // .dead -> .dead transition is invalid and harmlessly swallowed.
+            self.registry.transition(pid, .dead) catch {};
+            self.registry.remove(pid) catch {};
+            self.freeMailbox(pid);
+        }
+    }
 };
 
 // warden-7q1
