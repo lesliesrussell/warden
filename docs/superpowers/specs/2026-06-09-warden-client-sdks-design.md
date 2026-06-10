@@ -59,10 +59,28 @@ worker SDK's bridge socket / `WARDEN_SOCKET`.)
 | `proc.spawn` | `{cmd: [str], beam?: int, parent?: "b/p", restart?: "permanent"|"transient"|"temporary"}` | `{pid: "b/p"}` |
 | `proc.send` | `{pid: "b/p", type: str, body: any}` | `null` |
 | `proc.call` | `{pid: "b/p", type: str, body: any, timeout_ms?: int}` | `{type: str, body: any}` |
-| `proc.list` | `{beam?: int}` | `{processes: [{pid, kind, state, policy, last_active_ms}]}` |
+| `proc.list` | `{beam?: int}` | `{processes: [{beam, pid, kind, state, policy, last_active_ms}]}` |
 
 On failure the daemon returns `ok=false` with an `error` string (e.g.
 `proc.call` timeout → `error: "timeout"`).
+
+**Connection lifetime (verified against the daemon, 2026-06-10):** the control
+server handles exactly **one request per connection** — `handleConnection` reads
+a single frame, writes one response, and the socket is then closed server-side
+(`wardenctl` does connect→one request→close per command). There is no persistent
+multi-request session. The SDKs therefore open a fresh connection for each
+request (see §4); the blocking retry-connect contract still applies on every
+open.
+
+**`proc.list` shape (verified):** each entry carries `beam` and `pid` as
+**separate integers** (e.g. `{"beam":1,"pid":3,...}`), not a combined
+`"beam/proc"` string. Callers that want the compound pid reconstruct it as
+`f"{beam}/{pid}"`. (`proc.spawn` / `proc.call` / `proc.send` do use the
+`"beam/proc"` *string* form for their `pid` field — only `proc.list`'s rows
+split it.) Note also: `proc.list` currently enumerates only the primary beam's
+registry (tracked: warden-36j), and `proc.spawn` on a beam minted by
+`beam.create` fails (tracked: warden-95s) — clients should target the primary
+beam for now.
 
 ## API
 
@@ -102,24 +120,32 @@ Client.connect(path=None, *, timeout=None) -> Client      # classmethod / static
    has no server-initiated handshake frame (unlike the bridge protocol); the
    connection is immediately ready for requests.
 
-**Lazy reconnect:** the client tracks a `connected` flag. If a request fails
-because the socket is closed/reset (daemon restarted mid-session), the client
-marks itself disconnected and **the next call re-runs the retry-connect loop**
-before sending, so a daemon bounce is invisible to callers. The in-flight
-request that hit the drop raises a connection error (the caller may retry it).
+**Reconnect-per-request (one-shot protocol):** the daemon closes the connection
+after every response (see "Connection lifetime" above), so the client tracks a
+`connected` flag and marks itself disconnected **after each successful response**
+as well as on any drop. The next call re-runs the retry-connect loop (closing any
+stale connection first) before sending. A daemon bounce between requests is thus
+invisible to callers; an in-flight request whose socket drops mid-response raises
+a connection error (the caller may retry it). Because each request gets its own
+short-lived connection, the blocking retry-connect contract is exercised on every
+call — if the daemon is down when a request is issued, that request blocks
+(per the contract) until the daemon returns.
 
 ## Request/response handling (§4)
 
-A single connection with **serialized requests** (one in-flight at a time),
-guarded by an async lock (`asyncio.Lock` / a promise chain in TS):
+**Serialized requests** (one in-flight at a time), guarded by an async lock
+(`asyncio.Lock` / a promise chain in TS). Each request runs over its own
+short-lived connection (the one-shot protocol):
 
 1. acquire the lock,
-2. ensure connected (lazy reconnect if needed),
+2. ensure connected (open a fresh connection via the retry loop, closing any
+   stale one first),
 3. `req_id = next(counter)`; write the framed request,
 4. read exactly one length-prefixed response frame,
-5. assert its `req_id` matches (defensive — serialization guarantees it),
-6. release the lock,
-7. if `ok` is false → raise `WardenError(error)`; else return the relevant slice
+5. mark disconnected (the server is about to close this connection),
+6. assert its `req_id` matches (defensive — serialization guarantees it),
+7. release the lock,
+8. if `ok` is false → raise `WardenError(error)`; else return the relevant slice
    of `payload`.
 
 Serialization is intentional (req_id multiplexing buys nothing here per the
