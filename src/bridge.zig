@@ -679,6 +679,9 @@ pub const BridgeSupervisor = struct {
     reaper_interval_ms: std.atomic.Value(u64),
     reaper_stopping: std.atomic.Value(bool),
     reaper_thread: ?std.Thread,
+    // warden-47g: grace before a terminal registry entry + its mailbox are
+    // reclaimed by the reaper sweep. Plain field (set at init; tests may lower it).
+    reclaim_grace_ms: u64 = 30_000,
     // warden-dmg: protects `workers` and per-worker `bridge` swaps against the
     // reaper thread. The reader thread never takes it (no deadlock on join).
     mutex: sync.Mutex,
@@ -693,6 +696,8 @@ pub const BridgeSupervisor = struct {
             .reaper_interval_ms = std.atomic.Value(u64).init(restart_mod.default_interval_ms),
             .reaper_stopping = std.atomic.Value(bool).init(false),
             .reaper_thread = null,
+            // warden-47g
+            .reclaim_grace_ms = 30_000,
             // warden-dmg
             .mutex = .{},
         };
@@ -814,13 +819,19 @@ pub const BridgeSupervisor = struct {
             const iv = self.reaper_interval_ms.load(.acquire);
             clock.sleepNs(iv * std.time.ns_per_ms);
             if (self.reaper_stopping.load(.acquire)) break;
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            for (self.workers.items) |w| {
-                if (w.retired) continue;
-                if (!w.bridge.crashed.load(.acquire)) continue;
-                self.reapAndMaybeRespawn(w) catch {};
+            {
+                self.mutex.lock();
+                defer self.mutex.unlock();
+                for (self.workers.items) |w| {
+                    if (w.retired) continue;
+                    if (!w.bridge.crashed.load(.acquire)) continue;
+                    self.reapAndMaybeRespawn(w) catch {};
+                }
             }
+            // warden-47g: reclaim terminal registry entries + mailboxes. Done
+            // without the supervisor lock — it touches the runtime registry/
+            // mailboxes, not the worker list.
+            self.runtime.reclaimTerminal(self.reclaim_grace_ms, clock.nowMs());
         }
     }
 

@@ -309,3 +309,61 @@ test "log/note/warn emit events to logger without error" {
     try ctx.warning("a warning", null);
     try ctx.err("an error", null);
 }
+
+// warden-47g
+test "Runtime.reclaimTerminal removes idle terminal entries and frees mailboxes" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 5);
+    defer rt.destroy();
+
+    // Alive (running) — must survive.
+    const alive = try rt.registry.spawn(.native_worker, null, .{});
+    try rt.allocMailbox(alive, .{});
+    try rt.registry.transition(alive, .ready);
+    try rt.registry.transition(alive, .running);
+
+    // Terminal + idle — must be reclaimed.
+    const gone = try rt.registry.spawn(.native_worker, null, .{});
+    try rt.allocMailbox(gone, .{});
+    try rt.registry.transition(gone, .exiting);
+    rt.registry.mutex.lock();
+    rt.registry.map.getPtr(gone.proc).?.last_active_at = 0; // backdate beyond grace
+    rt.registry.mutex.unlock();
+
+    // Terminal but RECENT (last_active_at = now) — within grace, must survive.
+    const recent = try rt.registry.spawn(.native_worker, null, .{});
+    try rt.allocMailbox(recent, .{});
+    try rt.registry.transition(recent, .exiting);
+
+    // grace 1000ms, now=5000: gone(idle 5000) reclaimed; recent(idle ~now) kept.
+    rt.reclaimTerminal(1000, 5000);
+
+    try std.testing.expect(rt.registry.lookup(gone) == null);
+    try std.testing.expect(rt.getMailbox(gone) == null);
+    try std.testing.expect(rt.registry.lookup(alive) != null);
+    try std.testing.expect(rt.getMailbox(alive) != null);
+    try std.testing.expect(rt.registry.lookup(recent) != null);
+    try std.testing.expect(rt.getMailbox(recent) != null);
+}
+
+// warden-47g
+test "Runtime.tryDeliverMailbox: true when present, false after free" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 6);
+    defer rt.destroy();
+
+    const p = try rt.registry.spawn(.native_worker, null, .{});
+    try rt.allocMailbox(p, .{});
+    const msg = MessageEnvelope{
+        .kind = .request,
+        .@"type" = "t",
+        .id = "1",
+        .from = "6/1",
+        .to = "6/2",
+        .body = .null,
+    };
+    try std.testing.expect(try rt.tryDeliverMailbox(p, msg));
+    rt.freeMailbox(p);
+    try std.testing.expect(!try rt.tryDeliverMailbox(p, msg));
+    rt.freeMailbox(p); // idempotent — no double free
+}
