@@ -1,7 +1,6 @@
 // warden-3yd
 import test from "node:test";
 import assert from "node:assert/strict";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
