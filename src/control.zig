@@ -356,6 +356,30 @@ fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []co
 }
 
 // warden-di6
+// warden-36j: append a beam runtime's registry entries (matching the kind/state
+// filters) to `entries`, holding only that registry's lock for the scan.
+fn collectProcEntries(
+    rt: *Runtime,
+    filter_kind: ?[]const u8,
+    filter_state: ?[]const u8,
+    entries: *std.ArrayList(ProcessEntry),
+    allocator: std.mem.Allocator,
+) !void {
+    rt.registry.mutex.lock();
+    defer rt.registry.mutex.unlock();
+    var it = rt.registry.map.iterator();
+    while (it.next()) |kv| {
+        const e = kv.value_ptr.*;
+        if (filter_kind) |fk| {
+            if (!std.mem.eql(u8, @tagName(e.kind), fk)) continue;
+        }
+        if (filter_state) |fs| {
+            if (!std.mem.eql(u8, @tagName(e.state), fs)) continue;
+        }
+        try entries.append(allocator, e);
+    }
+}
+
 fn handleProcList(
     cs: *ControlServer,
     allocator: std.mem.Allocator,
@@ -398,22 +422,20 @@ fn handleProcList(
     var entries: std.ArrayList(ProcessEntry) = .empty;
     defer entries.deinit(allocator);
 
-    cs.runtime.registry.mutex.lock();
-    var it = cs.runtime.registry.map.iterator();
-    while (it.next()) |kv| {
-        const e = kv.value_ptr.*;
-        if (filter_beam) |fb| {
-            if (e.pid.beam != fb) continue;
+    // warden-36j: scan the target beam's registry (or every beam when
+    // unfiltered). Previously only cs.runtime (the primary beam) was scanned,
+    // so workers on beams created via beam.create were invisible to proc.list.
+    if (filter_beam) |fb| {
+        if (cs.runtimes.get(fb)) |rt| {
+            try collectProcEntries(rt, filter_kind, filter_state, &entries, allocator);
         }
-        if (filter_kind) |fk| {
-            if (!std.mem.eql(u8, @tagName(e.kind), fk)) continue;
+        // unknown beam -> empty list
+    } else {
+        var rit = cs.runtimes.iterator();
+        while (rit.next()) |kv| {
+            try collectProcEntries(kv.value_ptr.*, filter_kind, filter_state, &entries, allocator);
         }
-        if (filter_state) |fs| {
-            if (!std.mem.eql(u8, @tagName(e.state), fs)) continue;
-        }
-        try entries.append(allocator, e);
     }
-    cs.runtime.registry.mutex.unlock();
 
     const now = clock.nowMs();
 
