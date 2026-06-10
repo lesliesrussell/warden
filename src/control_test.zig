@@ -829,3 +829,70 @@ test "control server: topology.get spans non-primary beams" {
         try std.testing.expect(saw_new);
     }
 }
+
+// warden-0uj
+test "control server: proc.control targets the pid's own beam" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 90);
+    defer rt.destroy();
+    _ = try rt.registry.spawn(.native_worker, null, .{}); // a primary-beam process
+
+    const socket_path = "/tmp/warden_ctrl_test_0uj.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    // Create a second beam and add a worker, made pausable (.ready).
+    var new_beam: u32 = 0;
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"k1\",\"action\":\"beam.create\",\"payload\":{}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        new_beam = @intCast(parsed.value.object.get("payload").?.object.get("beam_id").?.integer);
+    }
+    const rt2 = cs.runtimes.get(new_beam).?;
+    const wpid = try rt2.registry.spawn(.native_worker, null, .{});
+    try rt2.registry.transition(wpid, .ready);
+
+    // Pause the worker on the NON-primary beam — must resolve that beam's registry.
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        const req = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"k2\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"{d}/{d}\",\"op\":\"pause\"}}}}",
+            .{ new_beam, wpid.proc });
+        defer allocator.free(req);
+        try control.writeFrame(std.testing.io, stream, req);
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(true, parsed.value.object.get("ok").?.bool);
+    }
+
+    // The process is actually paused in the new beam's registry.
+    rt2.registry.mutex.lock();
+    const st = rt2.registry.map.get(wpid.proc).?.state;
+    rt2.registry.mutex.unlock();
+    try std.testing.expectEqual(types.ProcessState.paused, st);
+
+    // Unknown beam -> ok=false (previously this silently hit the primary beam).
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"k3\",\"action\":\"proc.control\",\"payload\":{\"pid\":\"999/1\",\"op\":\"pause\"}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(false, parsed.value.object.get("ok").?.bool);
+        // pins the guard specifically (not the pre-fix "process not found").
+        try std.testing.expectEqualStrings("unknown beam", parsed.value.object.get("error").?.string);
+    }
+}
