@@ -709,3 +709,123 @@ test "control server: proc.list enumerates non-primary beams" {
         try std.testing.expect(found_primary);
     }
 }
+
+// warden-f9s
+test "control server: beam.list lists every beam" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 70);
+    defer rt.destroy();
+    _ = try rt.registry.spawn(.native_worker, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_test_f9s_beams.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    var new_beam: u32 = 0;
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"b1\",\"action\":\"beam.create\",\"payload\":{}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        new_beam = @intCast(parsed.value.object.get("payload").?.object.get("beam_id").?.integer);
+    }
+
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"b2\",\"action\":\"beam.list\",\"payload\":{}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const beams = parsed.value.object.get("payload").?.object.get("beams").?.array;
+        var saw_primary = false;
+        var saw_new = false;
+        for (beams.items) |bv| {
+            const bid = bv.object.get("beam_id").?.integer;
+            if (bid == 70) saw_primary = true;
+            if (bid == @as(i64, @intCast(new_beam))) saw_new = true;
+        }
+        try std.testing.expect(saw_primary);
+        try std.testing.expect(saw_new);
+        try std.testing.expect(beams.items.len >= 2);
+    }
+}
+
+// warden-f9s
+test "control server: topology.get spans non-primary beams" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 80);
+    defer rt.destroy();
+    _ = try rt.registry.spawn(.native_supervisor, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_test_f9s_topo.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    var new_beam: u32 = 0;
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"t1\",\"action\":\"beam.create\",\"payload\":{}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        new_beam = @intCast(parsed.value.object.get("payload").?.object.get("beam_id").?.integer);
+    }
+
+    const rt2 = cs.runtimes.get(new_beam).?;
+    const root_pid = try rt2.registry.spawn(.native_supervisor, null, .{});
+
+    // topology.get(beam=new_beam) includes the new beam's root.
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        const req = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"t2\",\"action\":\"topology.get\",\"payload\":{{\"beam\":{d}}}}}", .{new_beam});
+        defer allocator.free(req);
+        try control.writeFrame(std.testing.io, stream, req);
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const roots = parsed.value.object.get("payload").?.object.get("roots").?.array;
+        var found = false;
+        for (roots.items) |rv| {
+            if (rv.object.get("beam").?.integer == @as(i64, @intCast(new_beam)) and
+                rv.object.get("pid").?.integer == @as(i64, @intCast(root_pid.proc))) found = true;
+        }
+        try std.testing.expect(found);
+    }
+
+    // Unfiltered topology.get spans both beams.
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"t3\",\"action\":\"topology.get\",\"payload\":{}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const roots = parsed.value.object.get("payload").?.object.get("roots").?.array;
+        var saw_primary = false;
+        var saw_new = false;
+        for (roots.items) |rv| {
+            const b = rv.object.get("beam").?.integer;
+            if (b == 80) saw_primary = true;
+            if (b == @as(i64, @intCast(new_beam))) saw_new = true;
+        }
+        try std.testing.expect(saw_primary);
+        try std.testing.expect(saw_new);
+    }
+}
