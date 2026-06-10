@@ -16,6 +16,10 @@ const RETRY_CAP_MS = 2000;
 export const VALID_RESTART = ["permanent", "transient", "temporary"] as const;
 export type RestartPolicy = (typeof VALID_RESTART)[number];
 
+// warden-3yd
+// WardenError and WardenUnavailable are intentionally independent Error
+// subclasses (mirrors the Python SDK): WardenError means the daemon returned
+// ok=false; WardenUnavailable means an explicit connect timeout elapsed.
 export class WardenError extends Error {
   constructor(message: string) {
     super(message);
@@ -37,12 +41,13 @@ export function encodeFrame(obj: unknown): Buffer {
   return Buffer.concat([header, body]);
 }
 
-export function decodeFrame(body: Buffer): any {
+export function decodeBody(body: Buffer): unknown {
   return JSON.parse(body.toString("utf8"));
 }
 
 function expandHome(p: string): string {
   if (p === "~") return os.homedir();
+  // ~user form intentionally unsupported (Unix daemon socket paths only)
   if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
   return p;
 }

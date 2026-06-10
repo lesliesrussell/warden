@@ -1,11 +1,12 @@
 // warden-3yd
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
 import {
   WardenError,
   WardenUnavailable,
   encodeFrame,
-  decodeFrame,
+  decodeBody,
   resolvePath,
 } from "../src/index.ts";
 
@@ -17,17 +18,24 @@ test("encodeFrame is a 4-byte BE length prefix + JSON", () => {
   assert.deepEqual(JSON.parse(frame.subarray(4).toString("utf8")), obj);
 });
 
-test("decodeFrame round-trips a body buffer", () => {
+test("encodeFrame length prefix counts UTF-8 bytes, not characters", () => {
+  const obj = { s: "café — ümlaut" }; // multibyte: byte length > char length
+  const frame = encodeFrame(obj);
+  const expectedBytes = Buffer.byteLength(JSON.stringify(obj), "utf8");
+  assert.equal(frame.readUInt32BE(0), expectedBytes);
+  assert.ok(expectedBytes > JSON.stringify(obj).length); // sanity: it IS multibyte
+});
+
+test("decodeBody round-trips a body buffer", () => {
   const obj = { msg: "café — ümlaut", n: 7 };
   const frame = encodeFrame(obj);
   const body = frame.subarray(4);
-  assert.deepEqual(decodeFrame(body), obj);
+  assert.deepEqual(decodeBody(body), obj);
 });
 
 test("resolvePath: explicit arg wins, with ~ expansion", () => {
   assert.equal(resolvePath("/tmp/x.sock"), "/tmp/x.sock");
-  const home = process.env.HOME!;
-  assert.equal(resolvePath("~/y.sock"), `${home}/y.sock`);
+  assert.equal(resolvePath("~/y.sock"), `${os.homedir()}/y.sock`);
 });
 
 test("resolvePath: env var used when arg omitted", () => {
@@ -45,7 +53,7 @@ test("resolvePath: default when arg and env absent", () => {
   const prev = process.env.WARDEN_CTRL_SOCKET;
   delete process.env.WARDEN_CTRL_SOCKET;
   try {
-    assert.equal(resolvePath(), `${process.env.HOME}/.warden/ctrl.sock`);
+    assert.equal(resolvePath(), `${os.homedir()}/.warden/ctrl.sock`);
   } finally {
     if (prev !== undefined) process.env.WARDEN_CTRL_SOCKET = prev;
   }
