@@ -341,18 +341,30 @@ fn handleProcCall(
 fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []const u8, stream: std.Io.net.Stream) !void {
     const uptime_ms = clock.nowMs() - cs.started_at;
 
-    cs.runtime.registry.mutex.lock();
-    const proc_count = cs.runtime.registry.map.count();
-    cs.runtime.registry.mutex.unlock();
+    // warden-f9s: list every beam (each with its own registry count), not just
+    // the primary. Collect and sort beam ids for stable output.
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(allocator);
+    var rit = cs.runtimes.iterator();
+    while (rit.next()) |kv| try ids.append(allocator, kv.key_ptr.*);
+    std.mem.sort(u32, ids.items, {}, std.sort.asc(u32));
 
-    const resp = try std.fmt.allocPrint(allocator,
-        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null," ++
-        "\"payload\":{{\"beams\":[{{\"beam_id\":{d},\"version\":\"0.1.0\"," ++
-        "\"uptime_ms\":{d},\"process_count\":{d}}}]}}}}",
-        .{ req_id, cs.runtime.beam_id, uptime_ms, proc_count },
-    );
-    defer allocator.free(resp);
-    try writeFrame(cs.runtime.io, stream, resp);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
+    try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"beams\":[", .{req_id});
+    for (ids.items, 0..) |bid, idx| {
+        if (idx > 0) try w.writeByte(',');
+        const brt = cs.runtimes.get(bid).?;
+        brt.registry.mutex.lock();
+        const proc_count = brt.registry.map.count();
+        brt.registry.mutex.unlock();
+        try w.print(
+            "{{\"beam_id\":{d},\"version\":\"0.1.0\",\"uptime_ms\":{d},\"process_count\":{d}}}",
+            .{ bid, uptime_ms, proc_count });
+    }
+    try w.writeAll("]}}");
+    try writeFrame(cs.runtime.io, stream, buf.writer.buffered());
 }
 
 // warden-di6
@@ -510,16 +522,19 @@ fn handleTopologyGet(
     var entries: std.ArrayList(ProcessEntry) = .empty;
     defer entries.deinit(allocator);
 
-    cs.runtime.registry.mutex.lock();
-    var it = cs.runtime.registry.map.iterator();
-    while (it.next()) |kv| {
-        const e = kv.value_ptr.*;
-        if (filter_beam) |fb| {
-            if (e.pid.beam != fb) continue;
+    // warden-f9s: scan the target beam's registry (or every beam when
+    // unfiltered), mirroring handleProcList — previously only the primary beam
+    // was scanned, hiding foreign-beam processes from topology.get.
+    if (filter_beam) |fb| {
+        if (cs.runtimes.get(fb)) |rt| {
+            try collectProcEntries(rt, null, null, &entries, allocator);
         }
-        try entries.append(allocator, e);
+    } else {
+        var rit = cs.runtimes.iterator();
+        while (rit.next()) |kv| {
+            try collectProcEntries(kv.value_ptr.*, null, null, &entries, allocator);
+        }
     }
-    cs.runtime.registry.mutex.unlock();
 
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
