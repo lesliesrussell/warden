@@ -110,6 +110,9 @@ class Client:
             return
         # warden-09k: close any stale connection from a prior request before
         # reconnecting (one-shot protocol reconnects every request).
+        # we don't await wait_closed() here — the daemon already closed its end
+        # (one-shot protocol), and blocking the reconnect hot path on FIN is
+        # needless; Client.close() awaits wait_closed() for the final teardown.
         if self._writer is not None:
             try:
                 self._writer.close()

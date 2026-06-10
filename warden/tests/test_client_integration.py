@@ -22,6 +22,7 @@ _REPO_ROOT = os.path.abspath(
 )
 _DAEMON = os.path.join(_REPO_ROOT, "zig-out", "bin", "warden")
 _WORKER = os.path.join(_REPO_ROOT, "examples", "live_demo", "math_worker.py")
+_BLOCKING_WAIT_S = 0.3  # long enough to prove connect() is still retrying, short enough not to stall the suite
 
 
 def _daemon_available() -> bool:
@@ -104,13 +105,12 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_retry_connect_blocks_until_daemon_up(self):
         # Connect BEFORE the daemon exists; it must block, then succeed.
         connect_task = asyncio.create_task(Client.connect(self._sock, timeout=10))
-        await asyncio.sleep(0.3)  # prove it is still waiting, not errored
+        await asyncio.sleep(_BLOCKING_WAIT_S)  # still waiting, not errored
         self.assertFalse(connect_task.done())
 
         self._start_daemon()
-        self.assertTrue(_wait_for_socket(self._sock))
-
-        client = await connect_task
+        # let the in-flight connect carry the wait — don't block the loop with a poll
+        client = await asyncio.wait_for(connect_task, timeout=10)
         try:
             beam_id = await client.beam_create(beam=1)
             self.assertIsInstance(beam_id, int)

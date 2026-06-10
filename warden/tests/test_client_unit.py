@@ -221,6 +221,8 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         )
         writer = _FakeWriter()
         client = await _connected_client(reader, writer)
+        # the fake connector returns the same reader for both requests, so the second
+        # request "reconnects" onto the same pre-loaded reader — fine for asserting req_id order.
         await client._request("proc.list", {})
         await client._request("proc.list", {})
         self.assertEqual([r["req_id"] for r in _sent_requests(writer)], ["1", "2"])
