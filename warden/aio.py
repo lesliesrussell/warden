@@ -78,5 +78,76 @@ async def _connect_with_retry(
             delay = min(delay * 2, _RETRY_CAP)
 
 
-class Client:  # implemented in Task 3
-    pass
+# warden-09k
+class Client:
+    """Async client of the Warden control socket. One connection, serialized
+    requests. Use ``await Client.connect()`` to construct."""
+
+    def __init__(self, path: str, *, _connector=None):
+        self._path = path
+        self._connector = _connector  # test seam: async (path) -> (reader, writer)
+        self._reader: asyncio.StreamReader | None = None
+        self._writer = None
+        self._counter = 0
+        self._connected = False
+        self._lock = asyncio.Lock()
+
+    @classmethod
+    async def connect(
+        cls, path: str | None = None, *, timeout: float | None = None, _connector=None
+    ) -> "Client":
+        self = cls(_resolve_path(path), _connector=_connector)
+        await self._ensure_connected(timeout=timeout)
+        return self
+
+    async def _open(self):
+        if self._connector is not None:
+            return await self._connector(self._path)
+        return await asyncio.open_unix_connection(self._path)
+
+    async def _ensure_connected(self, *, timeout: float | None = None) -> None:
+        if self._connected:
+            return
+        reader, writer = await _connect_with_retry(self._open, timeout=timeout)
+        self._reader, self._writer, self._connected = reader, writer, True
+
+    async def _request(self, action: str, payload: Any) -> Any:
+        async with self._lock:
+            await self._ensure_connected()
+            self._counter += 1
+            req_id = str(self._counter)
+            frame = _encode_frame(
+                {"req_id": req_id, "action": action, "payload": payload}
+            )
+            try:
+                self._writer.write(frame)
+                await self._writer.drain()
+                resp = await _read_frame(self._reader)
+            except (ConnectionError, asyncio.IncompleteReadError, OSError) as exc:
+                self._connected = False
+                raise ConnectionError(
+                    f"warden connection lost during {action!r}"
+                ) from exc
+            if resp.get("req_id") != req_id:
+                raise WardenError(
+                    f"req_id mismatch: sent {req_id}, got {resp.get('req_id')!r}"
+                )
+            if not resp.get("ok"):
+                raise WardenError(resp.get("error") or "unknown error")
+            return resp.get("payload")
+
+    async def close(self) -> None:
+        if self._writer is not None:
+            self._writer.close()
+            try:
+                await self._writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+        self._reader = self._writer = None
+        self._connected = False
+
+    async def __aenter__(self) -> "Client":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.close()

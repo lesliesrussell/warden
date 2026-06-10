@@ -154,5 +154,106 @@ class RetryConnectTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+# warden-09k
+class _FakeWriter:
+    """Captures bytes written; no real socket."""
+
+    def __init__(self):
+        self.buffer = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.buffer.extend(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+def _reader_with(*responses: dict) -> asyncio.StreamReader:
+    reader = asyncio.StreamReader()
+    for r in responses:
+        reader.feed_data(_encode_frame(r))
+    return reader
+
+
+def _sent_requests(writer: _FakeWriter) -> list[dict]:
+    """Decode every length-prefixed frame the client wrote."""
+    out, buf, pos = [], bytes(writer.buffer), 0
+    while pos < len(buf):
+        (length,) = struct.unpack(">I", buf[pos : pos + 4])
+        out.append(json.loads(buf[pos + 4 : pos + 4 + length].decode("utf-8")))
+        pos += 4 + length
+    return out
+
+
+async def _connected_client(reader, writer):
+    async def connector(path):
+        return reader, writer
+
+    return await Client.connect("/tmp/ignored.sock", _connector=connector)
+
+
+class RequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_success_returns_payload(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"beam_id": 3}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        payload = await client._request("beam.create", {})
+        self.assertEqual(payload, {"beam_id": 3})
+        sent = _sent_requests(writer)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["req_id"], "1")
+        self.assertEqual(sent[0]["action"], "beam.create")
+        self.assertEqual(sent[0]["payload"], {})
+
+    async def test_req_id_increments_per_request(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {}},
+            {"req_id": "2", "ok": True, "error": None, "payload": {}},
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        await client._request("proc.list", {})
+        await client._request("proc.list", {})
+        self.assertEqual([r["req_id"] for r in _sent_requests(writer)], ["1", "2"])
+
+    async def test_ok_false_raises_warden_error(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": False, "error": "unknown beam", "payload": None}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        with self.assertRaises(WardenError) as ctx:
+            await client._request("proc.list", {"beam": 99})
+        self.assertIn("unknown beam", str(ctx.exception))
+
+    async def test_dropped_connection_marks_disconnected(self):
+        reader = asyncio.StreamReader()
+        reader.feed_eof()  # server hung up: readexactly raises IncompleteReadError
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        with self.assertRaises(ConnectionError):
+            await client._request("proc.list", {})
+        self.assertFalse(client._connected)
+
+    async def test_close_is_idempotent_and_closes_writer(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        await client.close()
+        self.assertTrue(writer.closed)
+        await client.close()  # second close must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
