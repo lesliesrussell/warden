@@ -55,7 +55,27 @@ async def _connect_with_retry(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     monotonic: Callable[[], float] | None = None,
 ) -> Any:
-    raise NotImplementedError  # implemented in Task 2
+    """Call ``connector`` until it succeeds, backing off 50ms→2s between tries.
+
+    Retries on the errors that mean "daemon not up yet" (``FileNotFoundError`` /
+    ``ConnectionRefusedError``). Blocks forever by default; if ``timeout`` is set
+    and the elapsed wait passes it, raises ``WardenUnavailable``. ``sleep`` and
+    ``monotonic`` are injectable for deterministic tests.
+    """
+    sleep = sleep if sleep is not None else asyncio.sleep
+    monotonic = monotonic if monotonic is not None else time.monotonic
+    deadline = None if timeout is None else monotonic() + timeout
+    delay = _RETRY_INITIAL
+    while True:
+        try:
+            return await connector()
+        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            if deadline is not None and monotonic() >= deadline:
+                raise WardenUnavailable(
+                    f"warden daemon not reachable within {timeout}s"
+                ) from exc
+            await sleep(delay)
+            delay = min(delay * 2, _RETRY_CAP)
 
 
 class Client:  # implemented in Task 3

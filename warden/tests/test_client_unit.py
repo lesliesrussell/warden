@@ -73,5 +73,82 @@ class ResolvePathTests(unittest.TestCase):
             )
 
 
+# warden-09k
+class RetryConnectTests(unittest.IsolatedAsyncioTestCase):
+    def _fake_clock(self):
+        """Return (sleep, monotonic, delays) where sleep advances a fake clock."""
+        state = {"now": 0.0}
+        delays: list[float] = []
+
+        async def sleep(d: float) -> None:
+            delays.append(d)
+            state["now"] += d
+
+        def monotonic() -> float:
+            return state["now"]
+
+        return sleep, monotonic, delays
+
+    async def test_backoff_schedule_then_success(self):
+        sleep, monotonic, delays = self._fake_clock()
+        attempts = {"n": 0}
+
+        async def connector():
+            attempts["n"] += 1
+            if attempts["n"] <= 8:
+                raise FileNotFoundError()
+            return ("reader", "writer")
+
+        result = await _connect_with_retry(
+            connector, timeout=None, sleep=sleep, monotonic=monotonic
+        )
+        self.assertEqual(result, ("reader", "writer"))
+        # 50ms doubling, capped at 2s: one sleep per failed attempt (8 failures)
+        self.assertEqual(delays, [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 2.0, 2.0])
+
+    async def test_connection_refused_also_retries(self):
+        sleep, monotonic, delays = self._fake_clock()
+        attempts = {"n": 0}
+
+        async def connector():
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise ConnectionRefusedError()
+            return "ok"
+
+        self.assertEqual(
+            await _connect_with_retry(connector, sleep=sleep, monotonic=monotonic),
+            "ok",
+        )
+        self.assertEqual(delays, [0.05])
+
+    async def test_timeout_raises_warden_unavailable(self):
+        sleep, monotonic, _ = self._fake_clock()
+
+        async def connector():
+            raise FileNotFoundError()
+
+        with self.assertRaises(WardenUnavailable):
+            await _connect_with_retry(
+                connector, timeout=1.0, sleep=sleep, monotonic=monotonic
+            )
+
+    async def test_no_timeout_never_raises_unavailable(self):
+        sleep, monotonic, _ = self._fake_clock()
+        attempts = {"n": 0}
+
+        async def connector():
+            attempts["n"] += 1
+            if attempts["n"] <= 50:
+                raise FileNotFoundError()
+            return "ok"
+
+        # Even after 50 failures, with no timeout it keeps going and succeeds.
+        self.assertEqual(
+            await _connect_with_retry(connector, sleep=sleep, monotonic=monotonic),
+            "ok",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
