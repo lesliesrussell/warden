@@ -717,10 +717,22 @@ fn handleProcControl(
 
     const pid = types.Pid{ .beam = beam_id, .proc = proc_id };
 
+    // warden-0uj: resolve the target beam's registry. proc.control previously
+    // operated on cs.runtime (the primary beam) regardless of the pid's beam,
+    // so a foreign-beam pid hit the wrong process or none at all.
+    const target_rt = cs.runtimes.get(beam_id) orelse {
+        const resp = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown beam\",\"payload\":null}}",
+            .{req_id});
+        defer allocator.free(resp);
+        return writeFrame(cs.runtime.io, stream, resp);
+    };
+    const reg = &target_rt.registry;
+
     // warden-h0j
     if (std.mem.eql(u8, op_str, "pause") or std.mem.eql(u8, op_str, "resume")) {
         const target_state: types.ProcessState = if (std.mem.eql(u8, op_str, "pause")) .paused else .ready;
-        if (cs.runtime.registry.transition(pid, target_state)) |_| {
+        if (reg.transition(pid, target_state)) |_| {
             const resp = try std.fmt.allocPrint(allocator,
                 "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"{s}\"}}}}",
                 .{ req_id, pid_str, op_str });
@@ -739,7 +751,7 @@ fn handleProcControl(
             try writeFrame(cs.runtime.io, stream, resp);
         }
     } else if (std.mem.eql(u8, op_str, "kill")) {
-        if (cs.runtime.registry.transition(pid, .exiting)) |_| {
+        if (reg.transition(pid, .exiting)) |_| {
             const resp = try std.fmt.allocPrint(allocator,
                 "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"kill\"}}}}",
                 .{ req_id, pid_str });
@@ -758,10 +770,10 @@ fn handleProcControl(
             try writeFrame(cs.runtime.io, stream, resp);
         }
     } else if (std.mem.eql(u8, op_str, "quarantine")) {
-        cs.runtime.registry.mutex.lock();
-        const entry = cs.runtime.registry.map.getPtr(pid.proc);
+        reg.mutex.lock();
+        const entry = reg.map.getPtr(pid.proc);
         if (entry) |e| e.policy.activity_class = .tiny;
-        cs.runtime.registry.mutex.unlock();
+        reg.mutex.unlock();
         if (entry == null) {
             const resp = try std.fmt.allocPrint(allocator,
                 "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"process not found\",\"payload\":null}}",
@@ -790,13 +802,13 @@ fn handleProcControl(
             defer allocator.free(resp);
             return writeFrame(cs.runtime.io, stream, resp);
         };
-        cs.runtime.registry.mutex.lock();
-        const entry = cs.runtime.registry.map.getPtr(pid.proc);
+        reg.mutex.lock();
+        const entry = reg.map.getPtr(pid.proc);
         if (entry) |e| {
             e.policy.activity_class = new_class;
             e.policy.promotion_ttl_ms = ttl_ms;
         }
-        cs.runtime.registry.mutex.unlock();
+        reg.mutex.unlock();
         if (entry == null) {
             const resp = try std.fmt.allocPrint(allocator,
                 "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"process not found\",\"payload\":null}}",
