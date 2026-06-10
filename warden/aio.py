@@ -128,9 +128,10 @@ class Client:
                 raise ConnectionError(
                     f"warden connection lost during {action!r}"
                 ) from exc
+            # warden-09k: daemon closes the connection after each response;
+            # mark disconnected so the next _request reconnects transparently.
+            self._connected = False
             if resp.get("req_id") != req_id:
-                # stream is desynchronized — force a reconnect on the next call
-                self._connected = False
                 raise WardenError(
                     f"req_id mismatch: sent {req_id}, got {resp.get('req_id')!r}"
                 )
