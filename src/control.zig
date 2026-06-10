@@ -293,6 +293,17 @@ fn handleProcCall(
 
     const caller_pid = try rt.registry.spawn(.native_worker, null, .{});
     try rt.allocMailbox(caller_pid, .{});
+    // warden-hiz: reclaim the ephemeral caller pid + mailbox on every exit path
+    // (reply found, timeout, or delivery error). This defer runs only after the
+    // function returns, so the receive loop below still has caller_pid's mailbox;
+    // a late reply arriving after cleanup is dropped safely (tryDeliverMailbox and
+    // freeMailbox share mailboxes_mutex).
+    defer {
+        rt.registry.transition(caller_pid, .exiting) catch {};
+        rt.registry.transition(caller_pid, .dead) catch {};
+        rt.registry.remove(caller_pid) catch {};
+        rt.freeMailbox(caller_pid);
+    }
 
     const caller_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ caller_pid.beam, caller_pid.proc });
     defer allocator.free(caller_str);
@@ -322,9 +333,9 @@ fn handleProcCall(
     const max_attempts: u32 = @intCast(timeout_ms / 10 + 1);
     var attempts: u32 = 0;
     while (attempts < max_attempts) : (attempts += 1) {
-        // warden-47g: caller_pid is an ephemeral native pid that is never
-        // transitioned to terminal, so reclaimTerminal never frees its mailbox
-        // — this getMailbox+use-after-unlock is safe only under that invariant.
+        // warden-hiz: caller_pid stays non-terminal for the duration of this
+        // loop (the cleanup defer at the top runs only after the function
+        // returns), so this getMailbox+use-after-unlock cannot race a reclaim.
         const mb = rt.getMailbox(caller_pid) orelse break;
         if (mb.receive(matchAny)) |reply| {
             var body_buf: std.Io.Writer.Allocating = .init(allocator);
