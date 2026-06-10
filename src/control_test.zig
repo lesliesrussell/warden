@@ -892,5 +892,7 @@ test "control server: proc.control targets the pid's own beam" {
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
         defer parsed.deinit();
         try std.testing.expectEqual(false, parsed.value.object.get("ok").?.bool);
+        // pins the guard specifically (not the pre-fix "process not found").
+        try std.testing.expectEqualStrings("unknown beam", parsed.value.object.get("error").?.string);
     }
 }
