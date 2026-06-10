@@ -60,7 +60,7 @@ export function resolvePath(p?: string): string {
 // warden-3yd
 export type Opener = () => Promise<net.Socket>;
 
-interface RetryClock {
+export interface RetryClock {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }
@@ -94,12 +94,15 @@ export async function connectWithRetry(
 
 // warden-3yd
 // Open a Unix-domain stream socket; rejects with the ENOENT/ECONNREFUSED that
-// connectWithRetry treats as "daemon not up yet".
+// connectWithRetry treats as "daemon not up yet". The returned socket carries a
+// no-op 'error' backstop so a stray post-connect error can't crash the process
+// before a caller attaches its own handler.
 export function openUnixSocket(sockPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const sock = net.createConnection({ path: sockPath });
     const onConnect = () => {
       sock.off("error", onError);
+      sock.on("error", () => {}); // backstop; per-request reader adds the real handler
       resolve(sock);
     };
     const onError = (err: Error) => {

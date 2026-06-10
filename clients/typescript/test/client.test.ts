@@ -123,7 +123,7 @@ test("timeout raises WardenUnavailable at the boundary", async () => {
     connectWithRetry(open as any, { timeoutMs: 1000, sleep, now }),
     WardenUnavailable,
   );
-  // deadline 1000ms: sleeps 50+100+200+400 = 750 (<1000), next check at 1550 fires
+  // sleeps 50+100+200+400+800; after the 800ms sleep clock=1550 ≥ deadline=1000 → throws
   assert.deepEqual(delays, [50, 100, 200, 400, 800]);
 });
 
