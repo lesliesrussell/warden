@@ -295,6 +295,42 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(w1.closed)                # stale writer closed
         self.assertFalse(w2.closed)               # current writer still open
 
+    # warden-09k
+    async def test_concurrent_requests_are_serialized(self):
+        # Fire N requests at once; the lock must serialize them so req_ids are
+        # assigned 1..N in order, each on its own one-shot connection. If the
+        # lock failed to serialize, the counter/connection pairing would break
+        # and the client's req_id-match check would raise.
+        n = 5
+        writers = [_FakeWriter() for _ in range(n)]
+        # request k (1-based) runs on the k-th connection and is assigned req_id str(k)
+        readers = [
+            _reader_with(
+                {"req_id": str(j + 1), "ok": True, "error": None, "payload": {"i": j + 1}}
+            )
+            for j in range(n)
+        ]
+        pairs = list(zip(readers, writers))
+        idx = {"n": 0}
+
+        async def connector(path):
+            pair = pairs[idx["n"]]
+            idx["n"] += 1
+            return pair
+
+        # connect() consumes pairs[0]; the 1st request reuses it, requests 2..n
+        # each reconnect and consume pairs[1..n-1]. So connector is called n times.
+        client = await Client.connect("/tmp/ignored.sock", _connector=connector)
+        results = await asyncio.gather(
+            *[client._request("proc.list", {}) for _ in range(n)]
+        )
+        # every request completed with its matching payload (no req_id mismatch)
+        self.assertEqual(sorted(r["i"] for r in results), [1, 2, 3, 4, 5])
+        # each writer received exactly one request, with req_ids 1..n in order
+        sent_ids = [_sent_requests(w)[0]["req_id"] for w in writers]
+        self.assertEqual(sent_ids, ["1", "2", "3", "4", "5"])
+        self.assertEqual(idx["n"], n)  # connect + (n-1) reconnects = n connector calls
+
 
 # warden-09k
 class VerbTests(unittest.IsolatedAsyncioTestCase):
