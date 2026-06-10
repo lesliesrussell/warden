@@ -139,14 +139,22 @@ class Client:
             return resp.get("payload")
 
     # warden-09k
+    @staticmethod
+    def _field(result, key: str, action: str):
+        if not isinstance(result, dict) or key not in result:
+            raise WardenError(
+                f"{action}: malformed response, missing {key!r}: {result!r}"
+            )
+        return result[key]
+
     async def beam_create(self, beam: int | None = None) -> int:
         payload = {} if beam is None else {"beam": beam}
         result = await self._request("beam.create", payload)
-        return result["beam_id"]
+        return self._field(result, "beam_id", "beam.create")
 
     async def proc_spawn(
         self,
-        cmd,
+        cmd: "str | list[str]",
         *,
         beam: int | None = None,
         parent: str | None = None,
@@ -157,7 +165,8 @@ class Client:
                 f"invalid restart policy {restart!r}; "
                 f"expected one of {_VALID_RESTART}"
             )
-        payload: dict[str, Any] = {"cmd": list(cmd)}
+        cmd_list = [cmd] if isinstance(cmd, str) else list(cmd)
+        payload: dict[str, Any] = {"cmd": cmd_list}
         if beam is not None:
             payload["beam"] = beam
         if parent is not None:
@@ -165,7 +174,7 @@ class Client:
         if restart is not None:
             payload["restart"] = restart
         result = await self._request("proc.spawn", payload)
-        return result["pid"]
+        return self._field(result, "pid", "proc.spawn")
 
     async def proc_send(self, pid: str, msg_type: str, body: Any) -> None:
         await self._request(
@@ -184,7 +193,7 @@ class Client:
     async def proc_list(self, beam: int | None = None) -> list:
         payload = {} if beam is None else {"beam": beam}
         result = await self._request("proc.list", payload)
-        return result["processes"]
+        return self._field(result, "processes", "proc.list")
 
     async def close(self) -> None:
         if self._writer is not None:

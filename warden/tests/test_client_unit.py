@@ -376,6 +376,36 @@ class VerbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await client.proc_list(beam=1), procs)
         self.assertEqual(_sent_requests(writer)[0]["payload"], {"beam": 1})
 
+    async def test_proc_spawn_string_cmd_becomes_single_element(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {"pid": "1/4"}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        await client.proc_spawn("worker.py")
+        self.assertEqual(
+            _sent_requests(writer)[0]["payload"], {"cmd": ["worker.py"]}
+        )
+
+    async def test_proc_call_default_timeout_ms(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None,
+             "payload": {"type": "res.ok", "body": 1}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        await client.proc_call("1/2", "req.x", None)
+        self.assertEqual(_sent_requests(writer)[0]["payload"]["timeout_ms"], 5000)
+
+    async def test_malformed_response_raises_warden_error(self):
+        reader = _reader_with(
+            {"req_id": "1", "ok": True, "error": None, "payload": {}}
+        )
+        writer = _FakeWriter()
+        client = await _connected_client(reader, writer)
+        with self.assertRaises(WardenError):
+            await client.beam_create()
+
 
 if __name__ == "__main__":
     unittest.main()
