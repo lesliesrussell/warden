@@ -628,3 +628,84 @@ test "management protocol: beam.create, proc.spawn, proc.send, proc.call" {
         try std.testing.expect(parsed.value.object.get("ok").?.bool);
     }
 }
+
+// warden-36j
+test "control server: proc.list enumerates non-primary beams" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 60);
+    defer rt.destroy();
+
+    // One process on the primary beam (60).
+    _ = try rt.registry.spawn(.native_worker, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_test_36j.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    // beam.create with no id mints a fresh beam (primary 60 + 1).
+    var new_beam: u32 = 0;
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"j1\",\"action\":\"beam.create\",\"payload\":{}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("ok").?.bool);
+        new_beam = @intCast(parsed.value.object.get("payload").?.object.get("beam_id").?.integer);
+    }
+    try std.testing.expect(new_beam != 60);
+
+    // Add a process directly to the new beam's registry.
+    const rt2 = cs.runtimes.get(new_beam).?;
+    const wpid = try rt2.registry.spawn(.native_worker, null, .{});
+
+    // proc.list(beam=new_beam) must surface the worker on that beam, and every
+    // returned row must belong to new_beam.
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        const req = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"j2\",\"action\":\"proc.list\",\"payload\":{{\"beam\":{d}}}}}", .{new_beam});
+        defer allocator.free(req);
+        try control.writeFrame(std.testing.io, stream, req);
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const procs = parsed.value.object.get("payload").?.object.get("processes").?.array;
+        var found = false;
+        for (procs.items) |pv| {
+            const o = pv.object;
+            try std.testing.expectEqual(@as(i64, @intCast(new_beam)), o.get("beam").?.integer);
+            if (o.get("pid").?.integer == @as(i64, @intCast(wpid.proc))) found = true;
+        }
+        try std.testing.expect(found);
+    }
+
+    // Unfiltered proc.list spans every beam — both primary (60) and the new one.
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream, "{\"req_id\":\"j3\",\"action\":\"proc.list\",\"payload\":{}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const procs = parsed.value.object.get("payload").?.object.get("processes").?.array;
+        var found_new = false;
+        var found_primary = false;
+        for (procs.items) |pv| {
+            const b = pv.object.get("beam").?.integer;
+            if (b == @as(i64, @intCast(new_beam))) found_new = true;
+            if (b == 60) found_primary = true;
+        }
+        try std.testing.expect(found_new);
+        try std.testing.expect(found_primary);
+    }
+}
