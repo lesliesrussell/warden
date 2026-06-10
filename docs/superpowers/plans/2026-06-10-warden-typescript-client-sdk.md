@@ -640,7 +640,7 @@ function readOneFrame(sock: net.Socket): Promise<any> {
       if (need >= 0 && buf.length >= 4 + need) {
         cleanup();
         try {
-          resolve(decodeFrame(buf.subarray(4, 4 + need)));
+          resolve(decodeBody(buf.subarray(4, 4 + need)));
         } catch (e) {
           reject(e);
         }
