@@ -1,0 +1,20 @@
+{
+  "name": "@warden/sdk",
+  "version": "0.1.0",
+  "description": "Async client for the Warden daemon control plane",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "files": [
+    "src"
+  ],
+  "license": "MIT"
+}
