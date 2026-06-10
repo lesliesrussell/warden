@@ -896,3 +896,41 @@ test "control server: proc.control targets the pid's own beam" {
         try std.testing.expectEqualStrings("unknown beam", parsed.value.object.get("error").?.string);
     }
 }
+
+// warden-hiz
+test "control server: proc.call does not leak the ephemeral caller pid" {
+    const allocator = std.testing.allocator;
+
+    const rt = try beam.Runtime.init(allocator, 95);
+    defer rt.destroy();
+
+    const socket_path = "/tmp/warden_ctrl_test_hiz.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    rt.registry.mutex.lock();
+    const before = rt.registry.map.count();
+    rt.registry.mutex.unlock();
+
+    // proc.call to a non-existent pid: creates caller_pid, delivery fails with
+    // "no mailbox", and the cleanup defer reclaims caller_pid before returning.
+    {
+        const stream = try testutil.connectUnix(socket_path);
+        defer stream.close(std.testing.io);
+        try control.writeFrame(std.testing.io, stream,
+            "{\"req_id\":\"h1\",\"action\":\"proc.call\",\"payload\":{\"pid\":\"95/999999\",\"type\":\"req.x\",\"body\":1,\"timeout_ms\":200}}");
+        const resp = try control.readFrame(std.testing.io, allocator, stream);
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        try std.testing.expect(!parsed.value.object.get("ok").?.bool);
+    }
+
+    rt.registry.mutex.lock();
+    const after = rt.registry.map.count();
+    rt.registry.mutex.unlock();
+    // caller_pid was created then reclaimed by the cleanup defer — net zero.
+    try std.testing.expectEqual(before, after);
+}
