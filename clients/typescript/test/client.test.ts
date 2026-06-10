@@ -264,6 +264,15 @@ test("request: ok=false maps to WardenError with the server message", async () =
   });
 });
 
+test("request: a non-object response frame raises WardenError", async () => {
+  const responder = () => 42 as any; // sends JSON `42`, not an object
+  await withFakeDaemon(responder, async (sockPath) => {
+    const c = await Warden.connect({ path: sockPath, timeout: 5 });
+    await assert.rejects((c as any).request("x", {}), WardenError);
+    await c.close();
+  });
+});
+
 test("request: a mid-request drop rejects and the next call reconnects", async () => {
   let first = true;
   const responder = (req: any) => {

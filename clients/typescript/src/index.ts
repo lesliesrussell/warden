@@ -202,9 +202,9 @@ export class Warden {
     }
   }
 
-  #writeAll(frame: Buffer): Promise<void> {
+  #writeAll(sock: net.Socket, frame: Buffer): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.#sock!.write(frame, (err) => (err ? reject(err) : resolve()));
+      sock.write(frame, (err) => (err ? reject(err) : resolve()));
     });
   }
 
@@ -223,21 +223,31 @@ export class Warden {
   request(action: string, payload: unknown): Promise<any> {
     return this.#runExclusive(async () => {
       await this.#ensureConnected();
+      const sock = this.#sock;
+      if (sock == null) {
+        // close() raced us between connect and first use
+        throw new Error(`warden: connection unavailable for '${action}'`);
+      }
       this.#counter += 1;
       const reqId = String(this.#counter);
       const frame = encodeFrame({ req_id: reqId, action, payload });
       let resp: any;
       try {
-        await this.#writeAll(frame);
-        resp = await readOneFrame(this.#sock!);
+        await this.#writeAll(sock, frame);
+        resp = await readOneFrame(sock);
       } catch (err) {
         this.#markDisconnected();
         throw new Error(
-          `warden connection lost during '${action}': ${(err as Error).message}`,
+          `warden connection lost during '${action}' (${this.#path}): ${(err as Error).message}`,
         );
       }
       // one-shot protocol: the daemon closes the socket after this response.
       this.#markDisconnected();
+      // Fix 2: guard against a non-object response frame (e.g. a bare JSON
+      // null/number) so we raise a clean WardenError instead of a TypeError.
+      if (resp == null || typeof resp !== "object") {
+        throw new WardenError(`malformed response frame: ${JSON.stringify(resp)}`);
+      }
       if (resp.req_id !== reqId) {
         throw new WardenError(
           `req_id mismatch: sent ${reqId}, got ${JSON.stringify(resp.req_id)}`,
