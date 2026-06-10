@@ -123,15 +123,19 @@ class RetryConnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delays, [0.05])
 
     async def test_timeout_raises_warden_unavailable(self):
-        sleep, monotonic, _ = self._fake_clock()
+        sleep, monotonic, delays = self._fake_clock()
 
         async def connector():
             raise FileNotFoundError()
 
-        with self.assertRaises(WardenUnavailable):
+        with self.assertRaises(WardenUnavailable) as ctx:
             await _connect_with_retry(
                 connector, timeout=1.0, sleep=sleep, monotonic=monotonic
             )
+        # deadline 1.0s: sleeps 0.05+0.1+0.2+0.4+0.8 = 1.55s cumulative, so the
+        # deadline check fires before the 6th sleep — no wasted sleeps past it.
+        self.assertEqual(delays, [0.05, 0.1, 0.2, 0.4, 0.8])
+        self.assertIsInstance(ctx.exception.__cause__, FileNotFoundError)
 
     async def test_no_timeout_never_raises_unavailable(self):
         sleep, monotonic, _ = self._fake_clock()
