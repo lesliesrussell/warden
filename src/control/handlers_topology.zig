@@ -2,20 +2,12 @@
 // topology.get RPC handler + tree serialization.
 
 const std = @import("std");
-const clock = @import("../clock.zig");
-const beam_mod = @import("../beam.zig");
-const bridge_mod = @import("../bridge.zig");
 const registry_mod = @import("../registry.zig");
-const types = @import("../types.zig");
 const transport = @import("transport.zig");
 const control = @import("../control.zig");
 
-const Runtime = beam_mod.Runtime;
-const Pid = types.Pid;
 const ProcessEntry = registry_mod.ProcessEntry;
 const HandlerCtx = control.HandlerCtx;
-const parseBeamProc = transport.parseBeamProc;
-const writeJsonEscapedString = transport.writeJsonEscapedString;
 const writeFrame = transport.writeFrame;
 const handlers_proc = @import("handlers_proc.zig");
 const collectProcEntries = handlers_proc.collectProcEntries;
