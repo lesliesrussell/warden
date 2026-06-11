@@ -153,3 +153,33 @@ test "seq starts at 1 and increments" {
         seq += 1;
     }
 }
+
+// warden-ga2
+// The active log rolls to <name>.log.1 once it passes rotate_at, bounding
+// per-process disk usage instead of growing without limit.
+test "log rotates past rotate_at threshold" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, 1, 100, tmp.dir);
+    defer log.deinit();
+    log.rotate_at = 200; // tiny threshold so a few records trigger a roll
+
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        try log.emit(.{ .spawn = .{} }, null);
+    }
+    try log.flush();
+
+    // A rotated file must exist (rotation happened at least once).
+    const rolled = tmp.dir.openFile(std.testing.io, "1-100.log.1", .{}) catch
+        return error.RotationDidNotHappen;
+    rolled.close(std.testing.io);
+
+    // The active log was reset, so it is far smaller than the whole stream.
+    const cur = try tmp.dir.openFile(std.testing.io, "1-100.log", .{});
+    defer cur.close(std.testing.io);
+    const st = try cur.stat(std.testing.io);
+    try std.testing.expect(st.size < 40 * 200);
+}

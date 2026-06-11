@@ -168,10 +168,11 @@ describes the runtime as implemented today, and is explicit about what is
   from accepting messages. A watchdog or supervisor is expected to react to the
   event/class. (`pause` is the mechanism that actually removes a process from
   scheduling.)
-- **Log-volume quota is not enforced.** `max_log_bytes_per_min` is carried in the
-  policy envelope but not applied by the runtime; there is no rotation,
-  compaction, or dropping. Log files grow unbounded — manage them with external
-  tooling (e.g. `logrotate`).
+- **Log size is bounded by rotation; the rate quota is not.** Each process's
+  active NDJSON log rolls to `<name>.log.1` at 1 MiB (older rotations shift up to
+  3, oldest dropped), bounding per-process disk to ~4 MiB. The per-minute
+  byte-rate quota (`max_log_bytes_per_min`) is **not** enforced — there is no
+  throttle or drop on burst rate.
 - **Policy events are engine-local.** Promote/demote/quarantine record a
   structured event in the policy engine (from both in-process and control-plane
   callers), but these are **not yet surfaced in the per-process NDJSON stream** —
