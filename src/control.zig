@@ -11,12 +11,8 @@ const env = @import("env.zig");
 const clock = @import("clock.zig");
 const beam_mod = @import("beam.zig");
 const bridge_mod = @import("bridge.zig");
-const registry_mod = @import("registry.zig");
-const types = @import("types.zig");
 
 const Runtime = beam_mod.Runtime;
-const Pid = types.Pid;
-const ProcessEntry = registry_mod.ProcessEntry;
 
 // warden-7zc: transport primitives now live in control/transport.zig. Re-export
 // the frame I/O (external API used by main.zig + the test files) and alias the
@@ -33,7 +29,6 @@ const handlers_control = @import("control/handlers_control.zig");
 const handlers_logs = @import("control/handlers_logs.zig");
 const handlers_topology = @import("control/handlers_topology.zig");
 
-
 // warden-0i6
 // HandlerCtx bundles everything an RPC handler needs into one value so every
 // handler shares the signature `fn(*const HandlerCtx) !void` — the precondition
@@ -46,17 +41,6 @@ pub const HandlerCtx = struct {
     payload: ?std.json.Value,
     r: Responder,
 };
-
-
-
-
-
-
-
-
-
-
-
 
 // warden-39v
 // warden-r28: action -> handler dispatch table. Adding an RPC means adding one
@@ -129,9 +113,6 @@ fn serverThread(cs: *ControlServer) void {
         handleConnection(cs, stream) catch {};
     }
 }
-
-
-
 
 // warden-39v
 pub const ControlServer = struct {

@@ -14,8 +14,6 @@ const Runtime = beam_mod.Runtime;
 const Pid = types.Pid;
 const ProcessEntry = registry_mod.ProcessEntry;
 const HandlerCtx = control.HandlerCtx;
-const parseBeamProc = transport.parseBeamProc;
-const writeJsonEscapedString = transport.writeJsonEscapedString;
 const writeFrame = transport.writeFrame;
 
 // warden-3qh: Zig 0.16 removed std.crypto.random; fill via std.Io.random.
