@@ -47,21 +47,77 @@ pub fn readFrame(io: std.Io, allocator: std.mem.Allocator, stream: std.Io.net.St
     return buf;
 }
 
-// warden-39v
-// warden-7oi
-fn sendErrResp(io: std.Io, allocator: std.mem.Allocator, req_id: []const u8, stream: std.Io.net.Stream, msg: []const u8) !void {
-    const resp = try std.fmt.allocPrint(allocator,
-        "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
-        .{ req_id, msg });
-    defer allocator.free(resp);
-    try writeFrame(io, stream, resp);
-}
-
 // warden-3qh: Zig 0.16 removed std.crypto.random; fill via std.Io.random.
 fn randomU32(io: std.Io) u32 {
     var b: [4]u8 = undefined;
     std.Io.random(io, &b);
     return std.mem.readInt(u32, &b, .little);
+}
+
+// warden-y3s
+// Responder centralizes the control-plane response envelope so handlers stop
+// hand-rolling `{"req_id":..,"ok":..,"error":..,"payload":..}` at every call
+// site. Behavior-preserving: req_id and error strings are still interpolated
+// raw — the JSON-escaping fix is tracked separately in warden-veb.
+const Responder = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    stream: std.Io.net.Stream,
+    req_id: []const u8,
+
+    /// Frame an error response: ok=false, the given message, null payload.
+    fn err(self: Responder, msg: []const u8) !void {
+        const resp = try std.fmt.allocPrint(self.allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
+            .{ self.req_id, msg });
+        defer self.allocator.free(resp);
+        try writeFrame(self.io, self.stream, resp);
+    }
+
+    /// Frame a success response wrapping an already-rendered payload fragment.
+    /// Pass "null" for an empty payload, or use okEmpty().
+    fn ok(self: Responder, payload_json: []const u8) !void {
+        const resp = try std.fmt.allocPrint(self.allocator,
+            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{s}}}",
+            .{ self.req_id, payload_json });
+        defer self.allocator.free(resp);
+        try writeFrame(self.io, self.stream, resp);
+    }
+
+    /// Frame a success response with a null payload.
+    fn okEmpty(self: Responder) !void {
+        try self.ok("null");
+    }
+
+    /// Write the success-envelope prefix up to `"payload":` into a caller-owned
+    /// writer, for large/streamed payloads that should not be copied through
+    /// allocPrint. Caller appends the payload value, then okSuffix(), then frames
+    /// the buffer once via writeFrame.
+    fn okPrefix(self: Responder, w: anytype) !void {
+        try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":", .{self.req_id});
+    }
+
+    fn okSuffix(_: Responder, w: anytype) !void {
+        try w.writeByte('}');
+    }
+};
+
+// warden-y3s
+// parseBeamProc parses a "beam/proc" pid string into its parts, distinguishing
+// the three failure modes so each caller can map them to its own error text
+// (proc.control and logs.stream historically differ on the beam/proc messages).
+const BeamProc = union(enum) {
+    ok: types.Pid,
+    no_slash,
+    bad_beam,
+    bad_proc,
+};
+
+fn parseBeamProc(s: []const u8) BeamProc {
+    const slash = std.mem.indexOfScalar(u8, s, '/') orelse return .no_slash;
+    const beam_id = std.fmt.parseInt(u32, s[0..slash], 10) catch return .bad_beam;
+    const proc_id = std.fmt.parseInt(u64, s[slash + 1 ..], 10) catch return .bad_proc;
+    return .{ .ok = .{ .beam = beam_id, .proc = proc_id } };
 }
 
 // warden-7oi
@@ -81,13 +137,13 @@ fn handleBeamCreate(
         }
     }
 
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+
     if (requested_id) |id| {
         if (cs.runtimes.get(id) != null) {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"beam_id\":{d}}}}}",
-                .{ req_id, id });
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
+            const payload = try std.fmt.allocPrint(allocator, "{{\"beam_id\":{d}}}", .{id});
+            defer allocator.free(payload);
+            return r.ok(payload);
         }
     }
 
@@ -105,11 +161,9 @@ fn handleBeamCreate(
     try cs.runtimes.put(new_id, rt);
     try cs.supervisors.put(new_id, sup);
 
-    const resp = try std.fmt.allocPrint(allocator,
-        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"beam_id\":{d}}}}}",
-        .{ req_id, new_id });
-    defer allocator.free(resp);
-    try writeFrame(cs.runtime.io, stream, resp);
+    const payload = try std.fmt.allocPrint(allocator, "{{\"beam_id\":{d}}}", .{new_id});
+    defer allocator.free(payload);
+    try r.ok(payload);
 }
 
 // warden-dmg
@@ -120,8 +174,9 @@ fn handleBeamReaper(
     stream: std.Io.net.Stream,
     payload_val: ?std.json.Value,
 ) !void {
-    const pv = payload_val orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing payload");
-    if (pv != .object) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "payload must be object");
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+    const pv = payload_val orelse return r.err("missing payload");
+    if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
 
     const beam_id: u32 = if (obj.get("beam")) |bv|
@@ -130,20 +185,18 @@ fn handleBeamReaper(
         cs.runtime.beam_id;
 
     const interval_val = obj.get("interval_ms") orelse
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing interval_ms");
+        return r.err("missing interval_ms");
     if (interval_val != .integer or interval_val.integer < 0)
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "interval_ms must be a non-negative integer");
+        return r.err("interval_ms must be a non-negative integer");
 
     const sup = cs.supervisors.get(beam_id) orelse
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
+        return r.err("unknown beam");
 
     const applied = sup.renice(@intCast(interval_val.integer));
 
-    const resp = try std.fmt.allocPrint(allocator,
-        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"interval_ms\":{d}}}}}",
-        .{ req_id, applied });
-    defer allocator.free(resp);
-    try writeFrame(cs.runtime.io, stream, resp);
+    const payload = try std.fmt.allocPrint(allocator, "{{\"interval_ms\":{d}}}", .{applied});
+    defer allocator.free(payload);
+    try r.ok(payload);
 }
 
 // warden-7oi
@@ -154,17 +207,18 @@ fn handleProcSpawn(
     stream: std.Io.net.Stream,
     payload_val: ?std.json.Value,
 ) !void {
-    const pv = payload_val orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing payload");
-    if (pv != .object) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "payload must be object");
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+    const pv = payload_val orelse return r.err("missing payload");
+    if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
 
-    const cmd_val = obj.get("cmd") orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing cmd");
-    if (cmd_val != .array) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "cmd must be array");
+    const cmd_val = obj.get("cmd") orelse return r.err("missing cmd");
+    if (cmd_val != .array) return r.err("cmd must be array");
 
     var cmd: std.ArrayList([]const u8) = .empty;
     defer cmd.deinit(allocator);
     for (cmd_val.array.items) |item| {
-        if (item != .string) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "cmd entries must be strings");
+        if (item != .string) return r.err("cmd entries must be strings");
         try cmd.append(allocator, item.string);
     }
 
@@ -179,7 +233,7 @@ fn handleProcSpawn(
     }
 
     const sup = cs.supervisors.get(beam_id) orelse
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
+        return r.err("unknown beam");
     const log_dir = cs.log_dir orelse "/tmp";
     const store_base = cs.store_base orelse "/tmp";
 
@@ -188,18 +242,16 @@ fn handleProcSpawn(
     if (obj.get("restart")) |rv| {
         if (rv == .string) {
             strategy = @import("restart.zig").Strategy.parse(rv.string) orelse
-                return sendErrResp(cs.runtime.io, allocator, req_id, stream, "invalid restart");
+                return r.err("invalid restart");
         }
     }
     const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid, strategy);
 
     const pid_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ pid.beam, pid.proc });
     defer allocator.free(pid_str);
-    const resp = try std.fmt.allocPrint(allocator,
-        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\"}}}}",
-        .{ req_id, pid_str });
-    defer allocator.free(resp);
-    try writeFrame(cs.runtime.io, stream, resp);
+    const payload = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\"}}", .{pid_str});
+    defer allocator.free(payload);
+    try r.ok(payload);
 }
 
 // warden-7oi
@@ -210,17 +262,18 @@ fn handleProcSend(
     stream: std.Io.net.Stream,
     payload_val: ?std.json.Value,
 ) !void {
-    const pv = payload_val orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing payload");
-    if (pv != .object) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "payload must be object");
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+    const pv = payload_val orelse return r.err("missing payload");
+    if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
 
-    const pid_val = obj.get("pid") orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing pid");
-    if (pid_val != .string) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "pid must be string");
+    const pid_val = obj.get("pid") orelse return r.err("missing pid");
+    if (pid_val != .string) return r.err("pid must be string");
     const target = bridge_mod.parsePidStr(pid_val.string) catch
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "invalid pid");
+        return r.err("invalid pid");
 
-    const type_val = obj.get("type") orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing type");
-    if (type_val != .string) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "type must be string");
+    const type_val = obj.get("type") orelse return r.err("missing type");
+    if (type_val != .string) return r.err("type must be string");
 
     const body = obj.get("body") orelse std.json.Value.null;
     const msg_id = try std.fmt.allocPrint(allocator, "ext-{x}", .{randomU32(cs.runtime.io)});
@@ -237,24 +290,16 @@ fn handleProcSend(
 
     if (cs.supervisors.get(target.beam)) |sup| {
         if (try sup.deliver(target, msg)) { // warden-dmg
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":null}}",
-                .{req_id});
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
+            return r.okEmpty();
         }
     }
     const rt = cs.runtimes.get(target.beam) orelse
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
+        return r.err("unknown beam");
     // warden-47g: deliver under the mailbox lock so a reaper reclaim can't free
     // the mailbox between lookup and enqueue.
     if (!try rt.tryDeliverMailbox(target, msg))
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "no mailbox for pid");
-    const resp = try std.fmt.allocPrint(allocator,
-        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":null}}",
-        .{req_id});
-    defer allocator.free(resp);
-    try writeFrame(cs.runtime.io, stream, resp);
+        return r.err("no mailbox for pid");
+    try r.okEmpty();
 }
 
 // warden-7oi
@@ -270,17 +315,18 @@ fn handleProcCall(
     stream: std.Io.net.Stream,
     payload_val: ?std.json.Value,
 ) !void {
-    const pv = payload_val orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing payload");
-    if (pv != .object) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "payload must be object");
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+    const pv = payload_val orelse return r.err("missing payload");
+    if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
 
-    const pid_val = obj.get("pid") orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing pid");
-    if (pid_val != .string) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "pid must be string");
+    const pid_val = obj.get("pid") orelse return r.err("missing pid");
+    if (pid_val != .string) return r.err("pid must be string");
     const target = bridge_mod.parsePidStr(pid_val.string) catch
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "invalid pid");
+        return r.err("invalid pid");
 
-    const type_val = obj.get("type") orelse return sendErrResp(cs.runtime.io, allocator, req_id, stream, "missing type");
-    if (type_val != .string) return sendErrResp(cs.runtime.io, allocator, req_id, stream, "type must be string");
+    const type_val = obj.get("type") orelse return r.err("missing type");
+    if (type_val != .string) return r.err("type must be string");
 
     const body = obj.get("body") orelse std.json.Value.null;
     const timeout_ms: u64 = if (obj.get("timeout_ms")) |tv|
@@ -289,7 +335,7 @@ fn handleProcCall(
         5000;
 
     const rt = cs.runtimes.get(target.beam) orelse
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
+        return r.err("unknown beam");
 
     const caller_pid = try rt.registry.spawn(.native_worker, null, .{});
     // warden-hiz: reclaim the ephemeral caller pid + mailbox on every exit path
@@ -325,10 +371,10 @@ fn handleProcCall(
         if (!try sup.deliver(target, msg)) { // warden-dmg
             // warden-47g: deliver under the mailbox lock (reclaim-safe).
             if (!try rt.tryDeliverMailbox(target, msg))
-                return sendErrResp(cs.runtime.io, allocator, req_id, stream, "no mailbox for pid");
+                return r.err("no mailbox for pid");
         }
     } else {
-        return sendErrResp(cs.runtime.io, allocator, req_id, stream, "unknown beam");
+        return r.err("unknown beam");
     }
 
     const max_attempts: u32 = @intCast(timeout_ms / 10 + 1);
@@ -342,16 +388,15 @@ fn handleProcCall(
             var body_buf: std.Io.Writer.Allocating = .init(allocator);
             defer body_buf.deinit();
             try bridge_mod.writeJsonValue(&body_buf.writer, reply.body);
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null," ++
-                "\"payload\":{{\"type\":\"{s}\",\"body\":{s}}}}}",
-                .{ req_id, reply.@"type", body_buf.writer.buffered() });
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
+            const payload = try std.fmt.allocPrint(allocator,
+                "{{\"type\":\"{s}\",\"body\":{s}}}",
+                .{ reply.@"type", body_buf.writer.buffered() });
+            defer allocator.free(payload);
+            return r.ok(payload);
         }
         clock.sleepNs(10 * std.time.ns_per_ms);
     }
-    try sendErrResp(cs.runtime.io, allocator, req_id, stream, "timeout");
+    try r.err("timeout");
 }
 
 fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []const u8, stream: std.Io.net.Stream) !void {
@@ -365,10 +410,12 @@ fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []co
     while (rit.next()) |kv| try ids.append(allocator, kv.key_ptr.*);
     std.mem.sort(u32, ids.items, {}, std.sort.asc(u32));
 
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const w = &buf.writer;
-    try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"beams\":[", .{req_id});
+    try r.okPrefix(w);
+    try w.writeAll("{\"beams\":[");
     for (ids.items, 0..) |bid, idx| {
         if (idx > 0) try w.writeByte(',');
         const brt = cs.runtimes.get(bid).?;
@@ -379,7 +426,8 @@ fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []co
             "{{\"beam_id\":{d},\"version\":\"0.1.0\",\"uptime_ms\":{d},\"process_count\":{d}}}",
             .{ bid, uptime_ms, proc_count });
     }
-    try w.writeAll("]}}");
+    try w.writeAll("]}");
+    try r.okSuffix(w);
     try writeFrame(cs.runtime.io, stream, buf.writer.buffered());
 }
 
@@ -468,11 +516,13 @@ fn handleProcList(
     const now = clock.nowMs();
 
     // Build JSON response.
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const w = &buf.writer;
 
-    try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"processes\":[", .{req_id});
+    try r.okPrefix(w);
+    try w.writeAll("{\"processes\":[");
 
     for (entries.items, 0..) |e, idx| {
         if (idx > 0) try w.writeByte(',');
@@ -490,7 +540,8 @@ fn handleProcList(
         );
     }
 
-    try w.writeAll("]}}");
+    try w.writeAll("]}");
+    try r.okSuffix(w);
     try writeFrame(cs.runtime.io, stream, buf.writer.buffered());
 }
 
@@ -552,11 +603,13 @@ fn handleTopologyGet(
         }
     }
 
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const w = &buf.writer;
 
-    try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"roots\":[", .{req_id});
+    try r.okPrefix(w);
+    try w.writeAll("{\"roots\":[");
 
     var first = true;
     for (entries.items) |e| {
@@ -566,7 +619,8 @@ fn handleTopologyGet(
         first = false;
     }
 
-    try w.writeAll("]}}");
+    try w.writeAll("]}");
+    try r.okSuffix(w);
     try writeFrame(cs.runtime.io, stream, buf.writer.buffered());
 }
 
@@ -626,12 +680,10 @@ fn handleConnection(cs: *ControlServer, stream: std.Io.net.Stream) !void {
         // warden-aai
         try handleProcControl(cs, allocator, req_id, stream, payload_val);
     } else {
-        const err_resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown action: {s}\",\"payload\":null}}",
-            .{ req_id, action },
-        );
-        defer allocator.free(err_resp);
-        try writeFrame(cs.runtime.io, stream, err_resp);
+        const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+        const m = try std.fmt.allocPrint(allocator, "unknown action: {s}", .{action});
+        defer allocator.free(m);
+        try r.err(m);
     }
 }
 
@@ -678,130 +730,70 @@ fn handleProcControl(
     stream: std.Io.net.Stream,
     payload_val: ?std.json.Value,
 ) !void {
-    const payload = payload_val orelse {
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"missing payload\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(resp);
-        return writeFrame(cs.runtime.io, stream, resp);
-    };
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+
+    const payload = payload_val orelse return r.err("missing payload");
 
     const pid_str = switch (payload.object.get("pid") orelse .null) {
         .string => |s| s,
-        else => {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"missing pid\",\"payload\":null}}",
-                .{req_id});
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
-        },
+        else => return r.err("missing pid"),
     };
 
     const op_str = switch (payload.object.get("op") orelse .null) {
         .string => |s| s,
-        else => {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"missing op\",\"payload\":null}}",
-                .{req_id});
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
-        },
+        else => return r.err("missing op"),
     };
 
-    const slash = std.mem.indexOf(u8, pid_str, "/") orelse {
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid format, expected beam/proc\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(resp);
-        return writeFrame(cs.runtime.io, stream, resp);
+    // warden-y3s: shared beam/proc parse; per-failure messages preserved (warden-aai).
+    const pid = switch (parseBeamProc(pid_str)) {
+        .ok => |p| p,
+        .no_slash => return r.err("invalid pid format, expected beam/proc"),
+        .bad_beam => return r.err("invalid beam id"),
+        .bad_proc => return r.err("invalid proc id"),
     };
-
-    const beam_id = std.fmt.parseInt(u32, pid_str[0..slash], 10) catch {
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid beam id\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(resp);
-        return writeFrame(cs.runtime.io, stream, resp);
-    };
-    const proc_id = std.fmt.parseInt(u64, pid_str[slash + 1 ..], 10) catch {
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid proc id\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(resp);
-        return writeFrame(cs.runtime.io, stream, resp);
-    };
-
-    const pid = types.Pid{ .beam = beam_id, .proc = proc_id };
+    const beam_id = pid.beam;
 
     // warden-0uj: resolve the target beam's registry. proc.control previously
     // operated on cs.runtime (the primary beam) regardless of the pid's beam,
     // so a foreign-beam pid hit the wrong process or none at all.
-    const target_rt = cs.runtimes.get(beam_id) orelse {
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown beam\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(resp);
-        return writeFrame(cs.runtime.io, stream, resp);
-    };
+    const target_rt = cs.runtimes.get(beam_id) orelse return r.err("unknown beam");
     const reg = &target_rt.registry;
 
     // warden-h0j
     if (std.mem.eql(u8, op_str, "pause") or std.mem.eql(u8, op_str, "resume")) {
         const target_state: types.ProcessState = if (std.mem.eql(u8, op_str, "pause")) .paused else .ready;
         if (reg.transition(pid, target_state)) |_| {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"{s}\"}}}}",
-                .{ req_id, pid_str, op_str });
-            defer allocator.free(resp);
-            try writeFrame(cs.runtime.io, stream, resp);
+            const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"{s}\"}}", .{ pid_str, op_str });
+            defer allocator.free(out);
+            try r.ok(out);
         } else |err| {
-            const msg: []const u8 = switch (err) {
+            try r.err(switch (err) {
                 error.ProcessNotFound => "process not found",
                 error.InvalidTransition => "invalid state transition",
                 else => "internal error",
-            };
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
-                .{ req_id, msg });
-            defer allocator.free(resp);
-            try writeFrame(cs.runtime.io, stream, resp);
+            });
         }
     } else if (std.mem.eql(u8, op_str, "kill")) {
         if (reg.transition(pid, .exiting)) |_| {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"kill\"}}}}",
-                .{ req_id, pid_str });
-            defer allocator.free(resp);
-            try writeFrame(cs.runtime.io, stream, resp);
+            const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"kill\"}}", .{pid_str});
+            defer allocator.free(out);
+            try r.ok(out);
         } else |err| {
-            const msg: []const u8 = switch (err) {
+            try r.err(switch (err) {
                 error.ProcessNotFound => "process not found",
                 error.InvalidTransition => "invalid state transition",
                 else => "internal error",
-            };
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
-                .{ req_id, msg });
-            defer allocator.free(resp);
-            try writeFrame(cs.runtime.io, stream, resp);
+            });
         }
     } else if (std.mem.eql(u8, op_str, "quarantine")) {
         reg.mutex.lock();
         const entry = reg.map.getPtr(pid.proc);
         if (entry) |e| e.policy.activity_class = .tiny;
         reg.mutex.unlock();
-        if (entry == null) {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"process not found\",\"payload\":null}}",
-                .{req_id});
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
-        }
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"quarantine\"}}}}",
-            .{ req_id, pid_str });
-        defer allocator.free(resp);
-        try writeFrame(cs.runtime.io, stream, resp);
+        if (entry == null) return r.err("process not found");
+        const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"quarantine\"}}", .{pid_str});
+        defer allocator.free(out);
+        try r.ok(out);
     } else if (std.mem.eql(u8, op_str, "promote")) {
         const class_str = switch (payload.object.get("class") orelse .null) {
             .string => |s| s,
@@ -812,11 +804,9 @@ fn handleProcControl(
             else => null,
         };
         const new_class = std.meta.stringToEnum(types.ActivityClass, class_str) orelse {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown activity class: {s}\",\"payload\":null}}",
-                .{ req_id, class_str });
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
+            const m = try std.fmt.allocPrint(allocator, "unknown activity class: {s}", .{class_str});
+            defer allocator.free(m);
+            return r.err(m);
         };
         reg.mutex.lock();
         const entry = reg.map.getPtr(pid.proc);
@@ -825,24 +815,14 @@ fn handleProcControl(
             e.policy.promotion_ttl_ms = ttl_ms;
         }
         reg.mutex.unlock();
-        if (entry == null) {
-            const resp = try std.fmt.allocPrint(allocator,
-                "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"process not found\",\"payload\":null}}",
-                .{req_id});
-            defer allocator.free(resp);
-            return writeFrame(cs.runtime.io, stream, resp);
-        }
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"pid\":\"{s}\",\"op\":\"promote\",\"class\":\"{s}\"}}}}",
-            .{ req_id, pid_str, class_str });
-        defer allocator.free(resp);
-        try writeFrame(cs.runtime.io, stream, resp);
+        if (entry == null) return r.err("process not found");
+        const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"promote\",\"class\":\"{s}\"}}", .{ pid_str, class_str });
+        defer allocator.free(out);
+        try r.ok(out);
     } else {
-        const resp = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"unknown op: {s}\",\"payload\":null}}",
-            .{ req_id, op_str });
-        defer allocator.free(resp);
-        try writeFrame(cs.runtime.io, stream, resp);
+        const m = try std.fmt.allocPrint(allocator, "unknown op: {s}", .{op_str});
+        defer allocator.free(m);
+        try r.err(m);
     }
 }
 
@@ -853,13 +833,8 @@ fn handleLogsStream(
     stream: std.Io.net.Stream,
     payload_val: ?std.json.Value,
 ) !void {
-    const log_dir = cs.log_dir orelse {
-        const err = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"log_dir not configured\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(err);
-        return writeFrame(cs.runtime.io, stream, err);
-    };
+    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+    const log_dir = cs.log_dir orelse return r.err("log_dir not configured");
 
     // Extract payload fields.
     var pid_str: []const u8 = "";
@@ -892,38 +867,22 @@ fn handleLogsStream(
     }
 
     // Parse PID: "beam/proc".
-    const slash = std.mem.indexOfScalar(u8, pid_str, '/') orelse {
-        const err = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid format, expected beam/proc\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(err);
-        return writeFrame(cs.runtime.io, stream, err);
+    // warden-y3s: shared beam/proc parse; logs.stream maps both numeric failures
+    // to the same "invalid pid" message it historically used.
+    const parsed_pid = switch (parseBeamProc(pid_str)) {
+        .ok => |p| p,
+        .no_slash => return r.err("invalid pid format, expected beam/proc"),
+        .bad_beam => return r.err("invalid pid"),
+        .bad_proc => return r.err("invalid pid"),
     };
-    const beam_id = std.fmt.parseInt(u32, pid_str[0..slash], 10) catch {
-        const err = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(err);
-        return writeFrame(cs.runtime.io, stream, err);
-    };
-    const proc_id = std.fmt.parseInt(u64, pid_str[slash + 1 ..], 10) catch {
-        const err = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"invalid pid\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(err);
-        return writeFrame(cs.runtime.io, stream, err);
-    };
+    const beam_id = parsed_pid.beam;
+    const proc_id = parsed_pid.proc;
 
     const log_path = try std.fmt.allocPrint(allocator, "{s}/{d}-{d}.log", .{ log_dir, beam_id, proc_id });
     defer allocator.free(log_path);
 
-    const initial = std.Io.Dir.cwd().readFileAlloc(cs.runtime.io, log_path, allocator, .limited(64 * 1024 * 1024)) catch {
-        const err = try std.fmt.allocPrint(allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"log file not found\",\"payload\":null}}",
-            .{req_id});
-        defer allocator.free(err);
-        return writeFrame(cs.runtime.io, stream, err);
-    };
+    const initial = std.Io.Dir.cwd().readFileAlloc(cs.runtime.io, log_path, allocator, .limited(64 * 1024 * 1024)) catch
+        return r.err("log file not found");
     defer allocator.free(initial);
 
     const cutoff_ts: f64 = if (since_ms > 0)
@@ -939,7 +898,8 @@ fn handleLogsStream(
         defer buf.deinit();
         const w = &buf.writer;
 
-        try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"lines\":[", .{req_id});
+        try r.okPrefix(w);
+        try w.writeAll("{\"lines\":[");
 
         var count: usize = 0;
         var lines = std.mem.splitScalar(u8, content, '\n');
@@ -955,16 +915,13 @@ fn handleLogsStream(
             count += 1;
         }
 
-        try w.print("],\"count\":{d}}}}}", .{count});
+        try w.print("],\"count\":{d}}}", .{count});
+        try r.okSuffix(w);
         return writeFrame(cs.runtime.io, stream, buf.writer.buffered());
     }
 
     // Follow mode: send streaming header, then tail the file.
-    const header = try std.fmt.allocPrint(allocator,
-        "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{{\"streaming\":true}}}}",
-        .{req_id});
-    defer allocator.free(header);
-    try writeFrame(cs.runtime.io, stream, header);
+    try r.ok("{\"streaming\":true}");
 
     // Send existing content first.
     const content = initial;
