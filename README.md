@@ -1,163 +1,120 @@
 # Warden
 
-**Execution-time control for AI agents** — implemented in Zig.
+An OTP-inspired runtime for supervising AI-agent processes — written in Zig.
 
 ---
 
-## The problem with today's agent stacks
+## What it is
 
-Current agent frameworks (LangChain, CrewAI, raw asyncio) hand control to the model and hope for the best. When something goes wrong, there is no runtime authority to intervene:
+Warden is an OTP-inspired runtime for supervising AI-agent processes in Zig. It
+borrows heavily, on purpose, from well-established supervision and
+process-isolation ideas, then applies them to the kinds of mixed Zig/Python
+worker trees common in modern agent systems.
 
-- A tool worker calls an HTTP endpoint with no timeout → the entire agent silently stalls
-- A context window grows without bound → the model hallucinates or the API returns an error
-- A memory service leaks state between sessions → subtle data corruption, no observable cause
-- A subprocess emits runaway logs → disk fills, no quota enforcement, no alerting
-
-The only recovery is killing the whole process and starting over.
-
-**Warden is the layer between your agent code and chaos.** Every process — planner, tool worker, memory service, model router — runs under supervision with bounded execution, structured observation, and runtime authority to pause, restart, or quarantine any component without disturbing the session.
-
----
-
-## What you can observe
-
-Every process emits an append-only NDJSON log stream. Every message received, tool call made, storage write issued, and policy change applied is recorded with a trace ID. No printf debugging — the full operational narrative is always queryable.
-
-```jsonl
-{"ts":1746582311.042,"beam":10,"pid":5,"seq":1,"event":"spawn","kind":"native_worker"}
-{"ts":1746582311.043,"beam":10,"pid":5,"seq":2,"event":"recv","msg_id":"req-01","from":"planner","type":"req.shell","task_id":"task-42"}
-{"ts":1746582311.043,"beam":10,"pid":5,"seq":3,"event":"tool_call","tool":"shell","input":"ls -la","corr":"req-01"}
-{"ts":1746582311.051,"beam":10,"pid":5,"seq":4,"event":"tool_result","tool":"shell","success":true,"corr":"req-01"}
-{"ts":1746582311.051,"beam":10,"pid":5,"seq":5,"event":"send","to":"planner","type":"res.ok","corr":"req-01"}
-{"ts":1746582311.052,"beam":10,"pid":5,"seq":6,"event":"note","msg":"task complete","task_id":"task-42"}
-```
-
-A watchdog reading `last_active_at` from the registry can detect a hung tool worker in milliseconds — not after a user timeout.
+A Warden system is a tree of supervised processes — planners, tool workers,
+memory services, model routers — each with its own mailbox, policy envelope, and
+structured log. Native processes run inside the Zig runtime; foreign processes
+(today, Python) run in their own runtime and participate through a bridge using
+the same process, messaging, logging, and supervision contracts. Warden is one
+reasonable way to build this kind of runtime, not a claim to a new model.
 
 ---
 
-## What you can control
+## Prior art
 
-The runtime exposes direct authority over any process. A watchdog proc can intervene without touching the session supervisor:
+Warden's core ideas are not new, and it does not claim them to be. The primary
+influence is **Erlang/OTP**: supervision trees, restart strategies
+(`one_for_one`, `rest_for_one`, …), per-process mailboxes, process isolation
+with no shared mutable memory, and runtime-level intervention are all
+established OTP concepts that Warden adopts more or less directly.
 
-```zig
-// Pause a worker that exceeded its log quota — without restarting the session.
-try ctx.pause(worker_pid);
-ctx.note("watchdog: worker paused — log quota exceeded", null) catch {};
+Adjacent traditions inform it as well — the **actor model** (Akka, Orleans, Ray)
+for message-passing process design, and **external process/infrastructure
+supervisors** (systemd, supervisord, Kubernetes) for the "something watches and
+restarts your workers" pattern at a different layer.
 
-// Wait for cooldown, then resume.
-std.Thread.sleep(cooldown_ns);
-ctx.note("watchdog: worker resumed — cooldown elapsed", null) catch {};
-try ctx.resume_(worker_pid);
-
-// Promote a planner to elevated priority for a latency-sensitive request.
-try ctx.promote(planner_pid, .elevated, 30_000, "latency-sensitive request");
-
-// Quarantine a foreign worker that stopped responding.
-try ctx.runtime.policy.quarantine(worker_pid, "idle_timeout");
-```
-
-The session supervisor PID never changes. The user never sees an interruption.
+What Warden contributes is not a new model but a particular implementation
+choice: those ideas, in a small Zig runtime, with first-class supervision of
+foreign-language workers, aimed at agent systems. It is one implementation among
+many valid ones.
 
 ---
 
-## Runnable demos
+## Why this exists
 
-### Hung worker recovery
+Agent components fail in operational ways that are awkward to handle purely in
+application code or purely at the infrastructure layer:
 
-A tool worker calls an HTTP endpoint with no timeout and blocks forever. Warden's watchdog detects the idle gap and restarts it:
+- a tool worker calls an HTTP endpoint with no timeout and stalls indefinitely,
+- a context or log stream grows without bound,
+- a worker leaks state across sessions,
+- a subprocess crashes and has to be noticed and restarted.
 
-```
-[session]  task_1 dispatched → worker pid:10/5
-[worker]   task_1 received — calling external API (no timeout)...
-[watchdog] worker pid:10/5 idle 150ms > budget — quarantining
-[executor] pid:10/5 killed — restarting (one_for_one)
-[session]  new worker pid:10/8 ready
-[session]  task_2 dispatched → worker pid:10/8
-[worker]   task_2 completed in 3ms
-[session]  session supervisor pid:10/3 unchanged throughout
-```
-
-See `examples/failure_recovery/` and `src/failure_recovery_test.zig`.
-
-### Watchdog intervention (pause/resume)
-
-A tool worker emits excessive log volume. The watchdog pauses it, waits for a cooldown, then resumes — without restarting the session:
-
-```
-[worker]   tool_worker: starting task
-[worker]   tool_worker: fetching data
-[worker]   tool_worker: processing results     ← quota exceeded after this
-[watchdog] watchdog: pausing tool_worker — log quota exceeded
-           (worker silent for 80ms cooldown)
-[watchdog] watchdog: resuming tool_worker — cooldown elapsed
-[worker]   tool_worker: resumed after watchdog pause
-```
-
-See `examples/watchdog_intervention/` and `src/watchdog_intervention_test.zig`.
-
-### Live demo — Python workers under Zig supervision
-
-Two Python workers run as supervised children of a Zig supervisor: a math service
-(Fibonacci, primes) and an HTTP server. The test drives the full lifecycle:
-
-```
-[registry]  math_worker and web_server appear in proc.list
-[topology]  supervisor has 2 children
-[messaging] req.fib(10) → res.ok body=55   (round-trip through ForeignBridge)
-[http]      GET /status → HTTP 200 {"status":"ok"}
-[lifecycle] pause math_worker → state=paused; resume → state=running
-```
-
-See `examples/live_demo/` and `src/live_demo_test.zig`.
+Many teams already handle these — with request timeouts, orchestration, process
+managers, retries, and careful application logic. Warden does not claim those
+approaches are missing or wrong. It focuses on a specific slice:
+**process-level supervision and control inside the runtime boundary**, so a
+watchdog or supervisor can observe, restart, pause, or throttle a misbehaving
+process — native or foreign — without tearing down the whole system, and so that
+intervention is uniform across Zig and Python workers.
 
 ---
 
-## wardenctl — runtime CLI
+## What Warden does
 
-`wardenctl` is a standalone CLI for inspecting and controlling a live Warden runtime over its Unix socket.
-
-```bash
-wardenctl [--socket <path>] [--json] <command>
-
-Commands:
-  beams                    List active beams
-  ps [--beam N] [--kind K] [--state S]
-                           List processes with optional filters
-  topology [--beam N]      Show supervisor tree (ASCII)
-  logs <beam/proc> [--since 10s] [--grep pattern] [--follow]
-                           Stream per-process NDJSON log
-  pause <beam/proc>        Pause a process
-  resume <beam/proc>       Resume a paused process
-  kill <beam/proc> --force [--reason '...']
-                           Transition process to exiting
-  quarantine <beam/proc> --force [--reason '...']
-                           Restrict process to minimum resources
-  promote <beam/proc> [--class elevated] [--ttl 30s] [--reason '...']
-                           Promote process activity class
-  renice <beam> <ms>       Adjust a beam's foreign-worker reaper poll interval
-                           (10–2000ms; lower = faster crash detection)
-```
-
-The runtime exposes a Unix socket at `~/.warden/ctrl.sock` by default (override with `$WARDEN_CTRL_SOCKET` or `--socket`).
+- Runs application work as supervised processes in a **supervision tree**, with
+  OTP-style restart strategies and bounded restart intensity.
+- **Isolates** processes: no shared mutable memory; communication is
+  asynchronous message passing through per-process **mailboxes**.
+- Supervises **foreign workers** (e.g. Python) as first-class processes — the
+  same PID, messaging, logging, and supervision contracts as native processes —
+  and auto-restarts them when their bridge connection drops or the process exits.
+- Enforces per-process **policy**: activity classes, quotas (mailbox, log
+  volume, storage), and promotion/demotion.
+- Records an **append-only NDJSON event log** per process, with trace and
+  correlation fields.
+- Exposes **runtime control** (inspect, pause, resume, quarantine, promote,
+  restart, log-tail) over a Unix socket via the `wardenctl` CLI.
 
 ---
 
-## Reference topologies
+## What Warden does not do
 
-Three concrete supervisor trees showing how Warden maps to real agent architectures:
+Warden supervises processes. It does not, by itself, provide:
 
-| Topology | File | Shape |
-|---|---|---|
-| Code assistant | `src/topology_code_assistant.zig` | planner + executor_sup (shell/lsp/file) + memory + watchdog |
-| Research agent | `src/topology_research_agent.zig` | ranker + retriever_sup (web/vector/doc) + synthesizer + citations |
-| ETL pipeline | `src/topology_etl.zig` | extractor → transformer → loader (rest_for_one, checkpointed) |
+- **Application-level idempotency** — restarting or replaying a worker does not
+  make its side effects safe to repeat; that is the application's responsibility.
+- **Exactly-once side effects** — a restarted worker may re-run partially
+  completed work.
+- **LLM output quality** — Warden governs processes, not what a model returns.
+- **Correctness of external APIs or tools** — it can restart a failing caller,
+  not fix the callee.
+- **Cross-machine distributed orchestration** — Warden supervises processes
+  within a runtime/host boundary; it is not a cluster scheduler.
+- **Invisible recovery** — restarting or pausing a process can have
+  application-visible effects (dropped in-flight work, added latency, lost
+  ephemeral state) unless the application is written to tolerate them.
+
+Where user-visible continuity matters, it has to be designed at the application
+level — idempotent handlers, checkpointing to `proc-state`, retriable requests.
+Warden provides the supervision primitives; it does not silently paper over
+failure.
 
 ---
 
-## Python SDK
+## Foreign workers and the Python SDK
 
-Tool workers written in Python participate through the same contracts as native processes:
+Supervising foreign-language workers as first-class processes is one of Warden's
+clearest practical differentiators, so it comes first.
+
+A foreign worker — today, a Python process — is spawned and supervised by the
+Zig runtime through the **foreign worker bridge**: length-prefixed JSON frames
+over a Unix domain socket. It receives the same treatment as a native process:
+a PID, a mailbox, a policy envelope, an NDJSON log stream, and a place in a
+supervision tree. From the runtime's point of view it is just another process.
+
+Tool workers written in Python participate through the same contracts as native
+processes:
 
 ```python
 import warden
@@ -176,6 +133,217 @@ warden.run_loop(ctx, {
 
 See `warden/` for the SDK and `examples/python_worker/` for a complete example.
 
+### Foreign worker auto-restart
+
+Foreign workers spawned via `proc.spawn` are supervised like native children: a
+per-beam reaper thread watches each worker's bridge and, when the worker crashes
+(socket drop or process exit), respawns it as a fresh incarnation (new PID)
+without human intervention. The prior PID transitions to a terminal state — a
+restart is a new process, not a resumed one.
+
+Each worker carries its own restart policy, set with the optional `restart`
+field on `proc.spawn` (default `permanent`):
+
+| Policy | Behavior on exit |
+|---|---|
+| `permanent` | Always restart (default) |
+| `transient` | Restart only on abnormal exit (non-zero / signal) |
+| `temporary` | Never restart |
+
+A runaway guard caps restarts at **3 within a 5s window** per worker; a worker
+that exceeds it is retired and logged (`restart` / give-up events in its NDJSON
+stream). The reaper's poll cadence (default 50ms) is adjustable on the fly per
+beam via the `beam.reaper` RPC or `wardenctl renice <beam> <ms>`.
+
+---
+
+## What you can observe
+
+Every process writes an **append-only NDJSON log stream** (`<beam>-<pid>.log`).
+Warden records operational events — lifecycle transitions, messages received and
+sent, tool calls, storage writes, policy changes — each stamped with a sequence
+number and, where available, trace and correlation IDs:
+
+```jsonl
+{"ts":1746582311.042,"beam":10,"pid":5,"seq":1,"event":"spawn","kind":"native_worker"}
+{"ts":1746582311.043,"beam":10,"pid":5,"seq":2,"event":"recv","msg_id":"req-01","from":"planner","type":"req.shell","task_id":"task-42"}
+{"ts":1746582311.043,"beam":10,"pid":5,"seq":3,"event":"tool_call","tool":"shell","input":"ls -la","corr":"req-01"}
+{"ts":1746582311.051,"beam":10,"pid":5,"seq":4,"event":"tool_result","tool":"shell","success":true,"corr":"req-01"}
+{"ts":1746582311.051,"beam":10,"pid":5,"seq":5,"event":"send","to":"planner","type":"res.ok","corr":"req-01"}
+{"ts":1746582311.052,"beam":10,"pid":5,"seq":6,"event":"note","msg":"task complete","task_id":"task-42"}
+```
+
+These are **raw events, not a causal explanation**. The correlation and trace
+fields are what you join *on*; reconstructing *why* something happened is
+analysis you do on top of the stream (for example with `wardenctl logs --grep`
+or your own tooling). Warden captures the events and lets you tail, filter, and
+correlate them — it does not index them or guarantee a queryable narrative on
+its own.
+
+Separately, a watchdog process can read `last_active_at` from the registry to
+notice a worker that has gone idle past its budget, rather than waiting on a
+downstream timeout.
+
+---
+
+## What you can control
+
+The runtime exposes intervention authority over any process, so a watchdog can
+act without restarting the session supervisor:
+
+```zig
+// Pause a worker that exceeded its log quota — stops scheduling it.
+try ctx.pause(worker_pid);
+ctx.note("watchdog: worker paused — log quota exceeded", null) catch {};
+
+// Wait for cooldown, then resume (return it to the ready queue).
+std.Thread.sleep(cooldown_ns);
+ctx.note("watchdog: worker resumed — cooldown elapsed", null) catch {};
+try ctx.resume_(worker_pid);
+
+// Promote a planner to elevated activity class for a bounded TTL.
+try ctx.promote(planner_pid, .elevated, 30_000, "latency-sensitive request");
+
+// Quarantine a foreign worker that stopped responding.
+try ctx.runtime.policy.quarantine(worker_pid, "idle_timeout");
+```
+
+What each intervention means at the runtime level:
+
+| Operation | Runtime effect |
+|---|---|
+| `pause` | Process stops being scheduled; queued and in-flight-from-its-view work does not progress until resumed. |
+| `resume` | Returns a paused process to the ready queue. |
+| `promote` | Raises the process's activity class (e.g. to `elevated`) for a bounded TTL, then it reverts. |
+| `quarantine` | Policy-defined throttling: moves the process to the `tiny` activity class (minimal scheduling/quota share). It is not a hard kill. |
+| restart | The supervisor terminates the process and starts a fresh incarnation with a **new PID**. |
+
+These act at the **process level**, and that can be application-visible. Pausing
+a worker mid-request delays that request; restarting one abandons whatever it had
+in flight and gives it a new PID. The session supervisor's own PID is unaffected
+by intervening on a child, but "the supervisor survived" is not the same as "the
+user saw nothing" — whether a given intervention is transparent depends on how
+the application handles dropped, delayed, or replayed work.
+
+---
+
+## Runnable demos
+
+These are **demonstrations of specific behaviors**, not proofs of end-to-end
+guarantees. Each notes what it shows and what it does not.
+
+### Hung worker recovery
+
+A tool worker calls an HTTP endpoint with no timeout and blocks forever. Warden's
+watchdog detects the idle gap and the supervisor restarts it:
+
+```
+[session]  task_1 dispatched → worker pid:10/5
+[worker]   task_1 received — calling external API (no timeout)...
+[watchdog] worker pid:10/5 idle 150ms > budget — quarantining
+[executor] pid:10/5 killed — restarting (one_for_one)
+[session]  new worker pid:10/8 ready
+[session]  task_2 dispatched → worker pid:10/8
+[worker]   task_2 completed in 3ms
+[session]  session supervisor pid:10/3 unchanged throughout
+```
+
+- **Shows:** supervised detection and replacement of a stuck worker; the session
+  supervisor PID is unchanged while the failed child is replaced.
+- **Does not prove:** transparent request replay, exactly-once effects, or that
+  the in-flight `task_1` had no user-visible impact. `task_1` was abandoned; only
+  `task_2` ran on the new worker.
+
+See `examples/failure_recovery/` and `src/failure_recovery_test.zig`.
+
+### Watchdog intervention (pause/resume)
+
+A tool worker emits excessive log volume. The watchdog pauses it, waits for a
+cooldown, then resumes — without restarting the session:
+
+```
+[worker]   tool_worker: starting task
+[worker]   tool_worker: fetching data
+[worker]   tool_worker: processing results     ← quota exceeded after this
+[watchdog] watchdog: pausing tool_worker — log quota exceeded
+           (worker silent for 80ms cooldown)
+[watchdog] watchdog: resuming tool_worker — cooldown elapsed
+[worker]   tool_worker: resumed after watchdog pause
+```
+
+- **Shows:** runtime-level pause/resume of a single process driven by a policy
+  signal, with the rest of the tree untouched.
+- **Does not prove:** that the paused worker's pending work completed on time, or
+  that pausing had no downstream latency effect.
+
+See `examples/watchdog_intervention/` and `src/watchdog_intervention_test.zig`.
+
+### Live demo — Python workers under Zig supervision
+
+Two Python workers run as supervised children of a Zig supervisor: a math service
+(Fibonacci, primes) and an HTTP server. The test drives the full lifecycle:
+
+```
+[registry]  math_worker and web_server appear in proc.list
+[topology]  supervisor has 2 children
+[messaging] req.fib(10) → res.ok body=55   (round-trip through ForeignBridge)
+[http]      GET /status → HTTP 200 {"status":"ok"}
+[lifecycle] pause math_worker → state=paused; resume → state=running
+```
+
+- **Shows:** foreign (Python) workers spawned, registered, messaged, and
+  lifecycle-controlled through the same contracts as native processes.
+- **Does not prove:** crash-recovery semantics for these particular workers (see
+  the hung-worker demo for that), or behavior under concurrent load.
+
+See `examples/live_demo/` and `src/live_demo_test.zig`.
+
+---
+
+## `wardenctl` — runtime CLI
+
+`wardenctl` is a standalone CLI for inspecting and controlling a live Warden
+runtime over its Unix socket.
+
+```bash
+wardenctl [--socket <path>] [--json] <command>
+
+Commands:
+  beams                    List active beams
+  ps [--beam N] [--kind K] [--state S]
+                           List processes with optional filters
+  topology [--beam N]      Show supervisor tree (ASCII)
+  logs <beam/proc> [--since 10s] [--grep pattern] [--follow]
+                           Stream per-process NDJSON log
+  pause <beam/proc>        Pause a process (stop scheduling it)
+  resume <beam/proc>       Resume a paused process
+  kill <beam/proc> --force [--reason '...']
+                           Transition process to exiting
+  quarantine <beam/proc> --force [--reason '...']
+                           Demote to the `tiny` activity class (policy-defined
+                           minimal scheduling/quota; not a hard kill)
+  promote <beam/proc> [--class elevated] [--ttl 30s] [--reason '...']
+                           Raise process activity class for a bounded TTL
+  renice <beam> <ms>       Adjust a beam's foreign-worker reaper poll interval
+                           (10–2000ms; lower = faster crash detection)
+```
+
+The runtime exposes a Unix socket at `~/.warden/ctrl.sock` by default (override
+with `$WARDEN_CTRL_SOCKET` or `--socket`).
+
+---
+
+## Reference topologies
+
+Three concrete supervisor trees showing how Warden maps to real agent
+architectures:
+
+| Topology | File | Shape |
+|---|---|---|
+| Code assistant | `src/topology_code_assistant.zig` | planner + executor_sup (shell/lsp/file) + memory + watchdog |
+| Research agent | `src/topology_research_agent.zig` | ranker + retriever_sup (web/vector/doc) + synthesizer + citations |
+| ETL pipeline | `src/topology_etl.zig` | extractor → transformer → loader (rest_for_one, checkpointed) |
+
 ---
 
 ## Internals
@@ -193,6 +361,7 @@ See `warden/` for the SDK and `examples/python_worker/` for a complete example.
 | Logging engine | `src/logger.zig` | Per-process append-only NDJSON stream |
 | Storage engine | `src/storage.zig` | `proc-temp`, `proc-cache`, `proc-state`, `shared-vol` namespace mediation |
 | Public API | `src/beam.zig` | `Runtime`, `Ctx`, and the full `beam.*` facade |
+| Control server | `src/control.zig` + `src/control/` | Unix-socket RPC: framing/`Responder` transport, table-dispatched per-domain handlers |
 | Foreign bridge | `src/bridge.zig` | Length-prefixed JSON frames over Unix domain socket; per-worker reaper that auto-restarts crashed foreign workers |
 | Restart policy | `src/restart.zig` | Foreign-worker restart decision (permanent/transient/temporary) + runaway guard |
 
@@ -200,12 +369,14 @@ See `warden/` for the SDK and `examples/python_worker/` for a complete example.
 
 Every process has:
 - An opaque `Pid` (`beam` + monotonic `proc` counter)
-- A mailbox for asynchronous message passing (sender never blocks, never touches recipient memory)
+- A **mailbox** for asynchronous message passing (sender never blocks, never touches recipient memory)
 - A `PolicyEnvelope` governing quotas and activity class
-- An append-only NDJSON log stream (`<beam>-<pid>.log`)
+- An append-only NDJSON **log stream** (`<beam>-<pid>.log`)
 - A storage namespace view (`proc-temp`, `proc-cache`, `proc-state`)
 
 ### Supervisor restart strategies
+
+Standard OTP strategies, adopted by name:
 
 | Strategy | Behavior |
 |---|---|
@@ -214,27 +385,6 @@ Every process has:
 | `rest_for_one` | Restart failed child + all started after it |
 | `transient` | Restart only on abnormal exit |
 | `temporary` | Never restart |
-
-### Foreign worker auto-restart
-
-Foreign (e.g. Python) workers spawned via `proc.spawn` are supervised the same way:
-a per-beam reaper thread watches each worker's bridge and, when the worker crashes
-(socket drop or process exit), respawns it as a fresh incarnation (new PID) without
-human intervention.
-
-Each worker carries its own restart policy, set with the optional `restart` field on
-`proc.spawn` (default `permanent`):
-
-| Policy | Behavior on exit |
-|---|---|
-| `permanent` | Always restart (default) |
-| `transient` | Restart only on abnormal exit (non-zero / signal) |
-| `temporary` | Never restart |
-
-A runaway guard caps restarts at **3 within a 5s window** per worker; a worker that
-exceeds it is retired and logged (`restart` / give-up events in its NDJSON stream).
-The reaper's poll cadence (default 50ms) is adjustable on the fly per beam via the
-`beam.reaper` RPC or `wardenctl renice <beam> <ms>`.
 
 ### Storage namespaces
 
@@ -285,7 +435,7 @@ const bytes = try ctx.fsRead(.proc_state, "checkpoint");
 Requires Zig 0.16.0.
 
 ```bash
-zig build test     # run all 116 tests
+zig build test     # run the full test suite (139 tests)
 zig build          # compile wardenctl + runtime library
 ```
 
