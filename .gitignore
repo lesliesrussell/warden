@@ -11,6 +11,7 @@ __pycache__/
 .beads/
 .nardo/
 .omc/
+.claude/
 .zig-cache/
 zig-out/
 
