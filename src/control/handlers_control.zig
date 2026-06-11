@@ -73,8 +73,13 @@ pub fn handleProcControl(h: *const HandlerCtx) !void {
             });
         }
     } else if (std.mem.eql(u8, op_str, "quarantine")) {
-        // warden-f19: mutate under the registry's own lock via its API.
-        reg.setActivityClass(pid, .tiny) catch return r.err("process not found");
+        // warden-qj2: route through the policy engine so quarantine emits a
+        // structured policy event and records the prior class for restore.
+        const reason = switch (payload.object.get("reason") orelse .null) {
+            .string => |s| s,
+            else => "wardenctl",
+        };
+        target_rt.policy.quarantine(pid, reason) catch return r.err("process not found");
         const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"quarantine\"}}", .{pid_str});
         defer allocator.free(out);
         try r.ok(out);
@@ -92,8 +97,13 @@ pub fn handleProcControl(h: *const HandlerCtx) !void {
             defer allocator.free(m);
             return r.err(m);
         };
-        // warden-f19: mutate under the registry's own lock via its API.
-        reg.setPromotion(pid, new_class, ttl_ms) catch return r.err("process not found");
+        // warden-qj2: route through the policy engine — emits a policy event and
+        // registers the TTL for auto-expiry (reg.setPromotion alone never expired).
+        const reason = switch (payload.object.get("reason") orelse .null) {
+            .string => |s| s,
+            else => "wardenctl",
+        };
+        target_rt.policy.promote(pid, new_class, ttl_ms, reason) catch return r.err("process not found");
         const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"promote\",\"class\":\"{s}\"}}", .{ pid_str, class_str });
         defer allocator.free(out);
         try r.ok(out);

@@ -92,11 +92,14 @@ pub const PolicyEngine = struct {
     // warden-u8y
     /// Promote process to class for ttl_ms.
     /// TODO: Authorization check not yet implemented — any caller can promote.
-    pub fn promote(self: *PolicyEngine, pid: Pid, class: ActivityClass, ttl_ms: u64, reason: []const u8) !void {
+    // warden-qj2: ttl_ms is optional (null = no auto-expiry); mutation goes
+    // through Registry.setPromotion (lock-held) instead of a lookup-pointer
+    // write, removing the use-after-unlock pattern fixed in warden-f19/092.
+    pub fn promote(self: *PolicyEngine, pid: Pid, class: ActivityClass, ttl_ms: ?u64, reason: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Look up the process in the registry
+        // Look up the process in the registry (read prior class as a copy).
         const entry = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
 
         // Determine prior class: if already promoted, preserve the original prior
@@ -110,7 +113,7 @@ pub const PolicyEngine = struct {
         const reason_copy = try self.allocator.dupe(u8, reason);
         errdefer self.allocator.free(reason_copy);
 
-        const expires_at = clock.nowMs() + @as(i64, @intCast(ttl_ms));
+        const expires_at = if (ttl_ms) |t| clock.nowMs() + @as(i64, @intCast(t)) else std.math.maxInt(i64);
         const rec = PromotionRecord{
             .prior_class = prior_class,
             .promoted_class = class,
@@ -119,8 +122,8 @@ pub const PolicyEngine = struct {
         };
         try self.promotions.put(pid.proc, rec);
 
-        // Update the registry entry's policy
-        entry.policy.activity_class = class;
+        // warden-qj2: lock-safe class + ttl write.
+        try self.registry.setPromotion(pid, class, ttl_ms);
 
         try self.emitEvent(pid, "promote", reason);
     }
@@ -131,11 +134,12 @@ pub const PolicyEngine = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const entry = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
+        // Existence check; mutation is done via the lock-safe registry API below.
+        _ = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
 
         const rec = self.promotions.get(pid.proc) orelse {
-            // Not promoted — demote to .normal as baseline
-            entry.policy.activity_class = .normal;
+            // Not promoted — demote to .normal as baseline (warden-qj2: lock-safe).
+            try self.registry.setActivityClass(pid, .normal);
             try self.emitEvent(pid, "demote", reason);
             return;
         };
@@ -146,8 +150,8 @@ pub const PolicyEngine = struct {
         self.allocator.free(rec.reason);
         _ = self.promotions.remove(pid.proc);
 
-        // Restore prior class
-        entry.policy.activity_class = prior;
+        // Restore prior class (warden-qj2: lock-safe).
+        try self.registry.setActivityClass(pid, prior);
 
         try self.emitEvent(pid, "demote", reason);
     }
@@ -179,10 +183,8 @@ pub const PolicyEngine = struct {
             const rec = self.promotions.get(proc_id) orelse continue;
             const pid = Pid{ .beam = self.registry.beam_id, .proc = proc_id };
 
-            // Restore prior class in registry
-            if (self.registry.lookup(pid)) |reg_entry| {
-                reg_entry.policy.activity_class = rec.prior_class;
-            }
+            // Restore prior class in registry (warden-qj2: lock-safe).
+            self.registry.setActivityClass(pid, rec.prior_class) catch {};
 
             // Emit expire event
             try self.emitEvent(pid, "expire", rec.reason);

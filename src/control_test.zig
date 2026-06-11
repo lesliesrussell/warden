@@ -1250,3 +1250,37 @@ test "control server (warden-h6u): proc.control with non-object payload" {
     try expectCtlError(allocator, socket_path,
         "{\"req_id\":\"h1\",\"action\":\"proc.control\",\"payload\":5}", "payload must be object");
 }
+
+// warden-qj2
+// proc.control quarantine now routes through the policy engine, which records a
+// structured policy event (previously the control path emitted nothing).
+test "control server (warden-qj2): proc.control quarantine emits a policy event" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const pid = try rt.registry.spawn(.native_worker, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_qj2.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    const req = try std.fmt.allocPrint(allocator,
+        "{{\"req_id\":\"q1\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"42/{d}\",\"op\":\"quarantine\",\"reason\":\"too noisy\"}}}}",
+        .{pid.proc});
+    defer allocator.free(req);
+    const resp = try ctlRpc(allocator, socket_path, req);
+    defer allocator.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("ok").?.bool);
+
+    rt.policy.mutex.lock();
+    defer rt.policy.mutex.unlock();
+    var found = false;
+    for (rt.policy.events.items) |e| {
+        if (std.mem.eql(u8, e.action, "quarantine") and std.mem.eql(u8, e.reason, "too noisy")) found = true;
+    }
+    try std.testing.expect(found);
+}
