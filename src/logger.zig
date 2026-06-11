@@ -219,15 +219,26 @@ pub const LogRecord = struct {
 /// internal write buffer is referenced by address. Always store behind a
 /// pointer or in a stable location (e.g. heap-allocated).
 pub const ProcessLogger = struct {
+    // warden-ga2: size-based rotation defaults. When the active log reaches
+    // `rotate_at` bytes it is rolled to `<name>.log.1` (older rotations shift up
+    // to `max_rotations`, oldest dropped), bounding per-process disk to roughly
+    // (max_rotations + 1) * rotate_at. Tests lower `rotate_at`.
+    pub const default_rotate_bytes: u64 = 1 << 20; // 1 MiB
+    pub const max_rotations: usize = 3;
+
     allocator: std.mem.Allocator,
     beam_id: u32,
     pid: u64,
     // warden-lmm: Zig 0.16 — File I/O routes through std.Io; the writer caches io.
     io: std.Io,
+    // warden-ga2: directory the log lives in, needed to rename on rotation.
+    dir: std.Io.Dir,
     file: std.Io.File,
     buf: [4096]u8,
     file_writer: std.Io.File.Writer,
     seq: u64,
+    // warden-ga2: rotate the active log once it reaches this many bytes.
+    rotate_at: u64,
 
     // warden-554
     /// Initialise in-place.  Caller must ensure the returned value is never
@@ -260,9 +271,11 @@ pub const ProcessLogger = struct {
         self.allocator = allocator;
         self.beam_id = beam_id;
         self.pid = pid;
+        self.dir = log_dir;
         self.file = file;
         self.buf = undefined;
         self.seq = 0;
+        self.rotate_at = default_rotate_bytes;
         // file_writer stores &self.buf — must be set after self is stable.
         self.file_writer = std.Io.File.Writer.init(file, io, &self.buf);
         self.file_writer.pos = st.size;
@@ -294,10 +307,12 @@ pub const ProcessLogger = struct {
             .allocator = allocator,
             .beam_id = beam_id,
             .pid = pid,
+            .dir = log_dir,
             .file = file,
             .buf = undefined,
             .file_writer = undefined,
             .seq = 0,
+            .rotate_at = default_rotate_bytes,
         };
         self.file_writer = std.Io.File.Writer.init(file, io, &self.buf);
         self.file_writer.pos = st.size;
@@ -346,6 +361,49 @@ pub const ProcessLogger = struct {
         }
 
         try w.writeAll("}\n");
+
+        // warden-ga2: roll the log once it grows past the threshold. Count both
+        // flushed bytes (writer.pos) and buffered-but-unflushed bytes
+        // (interface.end), since small records sit in the 4 KiB buffer. Best-
+        // effort: a rotation failure must not break logging.
+        if (self.file_writer.pos + self.file_writer.interface.end >= self.rotate_at) self.rotate() catch {};
+    }
+
+    // warden-ga2
+    /// Roll the active log to `<name>.log.1`, shifting older rotations up to
+    /// `max_rotations` (oldest dropped), then reopen a fresh active log.
+    /// Flushes first so the rolled file is complete.
+    fn rotate(self: *ProcessLogger) !void {
+        self.file_writer.interface.flush() catch {};
+        self.file.close(self.io);
+
+        var a: [64]u8 = undefined;
+        var b: [64]u8 = undefined;
+
+        // Drop the oldest rotation.
+        const oldest = std.fmt.bufPrint(&a, "{d}-{d}.log.{d}", .{ self.beam_id, self.pid, max_rotations }) catch unreachable;
+        self.dir.deleteFile(self.io, oldest) catch {};
+
+        // Shift remaining rotations up: .log.(i-1) -> .log.i.
+        var i: usize = max_rotations;
+        while (i > 1) : (i -= 1) {
+            const from = std.fmt.bufPrint(&a, "{d}-{d}.log.{d}", .{ self.beam_id, self.pid, i - 1 }) catch unreachable;
+            const to = std.fmt.bufPrint(&b, "{d}-{d}.log.{d}", .{ self.beam_id, self.pid, i }) catch unreachable;
+            self.dir.rename(from, self.dir, to, self.io) catch {};
+        }
+
+        // Active .log -> .log.1.
+        const cur = std.fmt.bufPrint(&a, "{d}-{d}.log", .{ self.beam_id, self.pid }) catch unreachable;
+        const one = std.fmt.bufPrint(&b, "{d}-{d}.log.1", .{ self.beam_id, self.pid }) catch unreachable;
+        self.dir.rename(cur, self.dir, one, self.io) catch {};
+
+        // Reopen a fresh active log and re-point the writer (self is stable, so
+        // &self.buf is still valid).
+        const name = std.fmt.bufPrint(&a, "{d}-{d}.log", .{ self.beam_id, self.pid }) catch unreachable;
+        const file = try self.dir.createFile(self.io, name, .{ .truncate = true, .exclusive = false });
+        self.file = file;
+        self.file_writer = std.Io.File.Writer.init(file, self.io, &self.buf);
+        self.file_writer.pos = 0;
     }
 
     // warden-554
