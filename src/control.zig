@@ -120,14 +120,25 @@ fn parseBeamProc(s: []const u8) BeamProc {
     return .{ .ok = .{ .beam = beam_id, .proc = proc_id } };
 }
 
-// warden-7oi
-fn handleBeamCreate(
+// warden-0i6
+// HandlerCtx bundles everything an RPC handler needs into one value so every
+// handler shares the signature `fn(*HandlerCtx) !void` — the precondition for
+// the action->handler dispatch table (warden-r28). Built once per connection.
+const HandlerCtx = struct {
     cs: *ControlServer,
     allocator: std.mem.Allocator,
     req_id: []const u8,
     stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
+    payload: ?std.json.Value,
+    r: Responder,
+};
+
+// warden-7oi
+fn handleBeamCreate(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const r = h.r;
     var requested_id: ?u32 = null;
     if (payload_val) |pv| {
         if (pv == .object) {
@@ -136,8 +147,6 @@ fn handleBeamCreate(
             }
         }
     }
-
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
 
     if (requested_id) |id| {
         if (cs.runtimes.get(id) != null) {
@@ -167,14 +176,11 @@ fn handleBeamCreate(
 }
 
 // warden-dmg
-fn handleBeamReaper(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+fn handleBeamReaper(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const r = h.r;
     const pv = payload_val orelse return r.err("missing payload");
     if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
@@ -200,14 +206,11 @@ fn handleBeamReaper(
 }
 
 // warden-7oi
-fn handleProcSpawn(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+fn handleProcSpawn(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const r = h.r;
     const pv = payload_val orelse return r.err("missing payload");
     if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
@@ -255,14 +258,11 @@ fn handleProcSpawn(
 }
 
 // warden-7oi
-fn handleProcSend(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+fn handleProcSend(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const r = h.r;
     const pv = payload_val orelse return r.err("missing payload");
     if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
@@ -308,14 +308,11 @@ fn matchAny(_: types.MessageEnvelope) bool {
 }
 
 // warden-7oi
-fn handleProcCall(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+fn handleProcCall(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const r = h.r;
     const pv = payload_val orelse return r.err("missing payload");
     if (pv != .object) return r.err("payload must be object");
     const obj = pv.object;
@@ -399,7 +396,11 @@ fn handleProcCall(
     try r.err("timeout");
 }
 
-fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []const u8, stream: std.Io.net.Stream) !void {
+fn handleBeamList(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const stream = h.stream;
+    const r = h.r;
     const uptime_ms = clock.nowMs() - cs.started_at;
 
     // warden-f9s: list every beam (each with its own registry count), not just
@@ -410,7 +411,6 @@ fn handleBeamList(cs: *ControlServer, allocator: std.mem.Allocator, req_id: []co
     while (rit.next()) |kv| try ids.append(allocator, kv.key_ptr.*);
     std.mem.sort(u32, ids.items, {}, std.sort.asc(u32));
 
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const w = &buf.writer;
@@ -456,13 +456,12 @@ fn collectProcEntries(
     }
 }
 
-fn handleProcList(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
+fn handleProcList(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const stream = h.stream;
+    const r = h.r;
     // Extract optional filters from payload.
     var filter_beam: ?u32 = null;
     var filter_kind: ?[]const u8 = null;
@@ -516,7 +515,6 @@ fn handleProcList(
     const now = clock.nowMs();
 
     // Build JSON response.
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const w = &buf.writer;
@@ -564,13 +562,12 @@ fn writeTreeNode(entries: []const ProcessEntry, node: ProcessEntry, w: anytype) 
 }
 
 // warden-mf3
-fn handleTopologyGet(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
+fn handleTopologyGet(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const stream = h.stream;
+    const r = h.r;
     var filter_beam: ?u32 = null;
     if (payload_val) |pv| {
         switch (pv) {
@@ -603,7 +600,6 @@ fn handleTopologyGet(
         }
     }
 
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
     var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
     const w = &buf.writer;
@@ -648,42 +644,49 @@ fn handleConnection(cs: *ControlServer, stream: std.Io.net.Stream) !void {
         else => return error.InvalidAction,
     };
 
-    const payload_val = obj.get("payload");
+    // warden-0i6: build the per-request handler context once, then dispatch.
+    const h = HandlerCtx{
+        .cs = cs,
+        .allocator = allocator,
+        .req_id = req_id,
+        .stream = stream,
+        .payload = obj.get("payload"),
+        .r = .{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id },
+    };
 
     if (std.mem.eql(u8, action, "beam.create")) {
         // warden-7oi
-        try handleBeamCreate(cs, allocator, req_id, stream, payload_val);
+        try handleBeamCreate(&h);
     } else if (std.mem.eql(u8, action, "beam.reaper")) {
         // warden-dmg
-        try handleBeamReaper(cs, allocator, req_id, stream, payload_val);
+        try handleBeamReaper(&h);
     } else if (std.mem.eql(u8, action, "proc.spawn")) {
         // warden-7oi
-        try handleProcSpawn(cs, allocator, req_id, stream, payload_val);
+        try handleProcSpawn(&h);
     } else if (std.mem.eql(u8, action, "proc.send")) {
         // warden-7oi
-        try handleProcSend(cs, allocator, req_id, stream, payload_val);
+        try handleProcSend(&h);
     } else if (std.mem.eql(u8, action, "proc.call")) {
         // warden-7oi
-        try handleProcCall(cs, allocator, req_id, stream, payload_val);
+        try handleProcCall(&h);
     } else if (std.mem.eql(u8, action, "beam.list")) {
-        try handleBeamList(cs, allocator, req_id, stream);
+        try handleBeamList(&h);
     } else if (std.mem.eql(u8, action, "proc.list")) {
         // warden-di6
-        try handleProcList(cs, allocator, req_id, stream, payload_val);
+        try handleProcList(&h);
     } else if (std.mem.eql(u8, action, "topology.get")) {
         // warden-mf3
-        try handleTopologyGet(cs, allocator, req_id, stream, payload_val);
+        try handleTopologyGet(&h);
     } else if (std.mem.eql(u8, action, "logs.stream")) {
         // warden-9jm
-        try handleLogsStream(cs, allocator, req_id, stream, payload_val);
+        try handleLogsStream(&h);
     } else if (std.mem.eql(u8, action, "proc.control")) {
         // warden-aai
-        try handleProcControl(cs, allocator, req_id, stream, payload_val);
+        try handleProcControl(&h);
     } else {
-        const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
         const m = try std.fmt.allocPrint(allocator, "unknown action: {s}", .{action});
         defer allocator.free(m);
-        try r.err(m);
+        try h.r.err(m);
     }
 }
 
@@ -723,14 +726,11 @@ fn extractTs(line: []const u8) f64 {
 }
 
 // warden-aai
-fn handleProcControl(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+fn handleProcControl(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const r = h.r;
 
     const payload = payload_val orelse return r.err("missing payload");
 
@@ -826,14 +826,12 @@ fn handleProcControl(
     }
 }
 
-fn handleLogsStream(
-    cs: *ControlServer,
-    allocator: std.mem.Allocator,
-    req_id: []const u8,
-    stream: std.Io.net.Stream,
-    payload_val: ?std.json.Value,
-) !void {
-    const r = Responder{ .io = cs.runtime.io, .allocator = allocator, .stream = stream, .req_id = req_id };
+fn handleLogsStream(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const payload_val = h.payload;
+    const stream = h.stream;
+    const r = h.r;
     const log_dir = cs.log_dir orelse return r.err("log_dir not configured");
 
     // Extract payload fields.
