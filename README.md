@@ -172,6 +172,10 @@ describes the runtime as implemented today, and is explicit about what is
   policy envelope but not applied by the runtime; there is no rotation,
   compaction, or dropping. Log files grow unbounded — manage them with external
   tooling (e.g. `logrotate`).
+- **Policy events are engine-local.** Promote/demote/quarantine record a
+  structured event in the policy engine (from both in-process and control-plane
+  callers), but these are **not yet surfaced in the per-process NDJSON stream** —
+  external orchestrators cannot observe them through logs today.
 
 ### Logging durability
 
