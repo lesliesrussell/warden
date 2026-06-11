@@ -114,3 +114,44 @@ pub fn handleProcControl(h: *const HandlerCtx) !void {
     }
 }
 
+
+// warden-2rb
+/// policy.events — return the target beam's recorded policy events
+/// (promote/demote/quarantine/expire) so external orchestrators can observe
+/// control-plane policy actions. Optional payload `beam` selects the beam
+/// (default: the primary beam).
+pub fn handlePolicyEvents(h: *const HandlerCtx) !void {
+    const cs = h.cs;
+    const allocator = h.allocator;
+    const r = h.r;
+
+    var beam_id: u32 = cs.runtime.beam_id;
+    if (h.payload) |pv| {
+        if (pv == .object) {
+            if (pv.object.get("beam")) |bv| {
+                if (bv == .integer) beam_id = @intCast(bv.integer);
+            }
+        }
+    }
+    const target_rt = cs.runtimes.get(beam_id) orelse return r.err("unknown beam");
+
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const w = &buf.writer;
+    try w.writeAll("{\"events\":[");
+    {
+        // Hold the policy lock only while reading the events into the buffer.
+        target_rt.policy.mutex.lock();
+        defer target_rt.policy.mutex.unlock();
+        for (target_rt.policy.events.items, 0..) |e, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.print("{{\"pid\":\"{d}/{d}\",\"action\":", .{ e.pid.beam, e.pid.proc });
+            try transport.writeJsonEscapedString(w, e.action);
+            try w.writeAll(",\"reason\":");
+            try transport.writeJsonEscapedString(w, e.reason);
+            try w.print(",\"ts\":{d}}}", .{e.ts});
+        }
+    }
+    try w.writeAll("]}");
+    try r.ok(buf.writer.buffered());
+}
