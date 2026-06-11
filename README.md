@@ -159,15 +159,17 @@ describes the runtime as implemented today, and is explicit about what is
   (`reject_new`, `drop_oldest_low`, `escalate_supervisor`, `throttle_sender`);
   overflow surfaces to the sender as `error.MailboxFull` (or drops a
   low-priority message under `drop_oldest_low`).
-- **Activity classes are advisory.** Classes (`tiny`/`normal`/`elevated`/…) and
-  `promote`/`demote` set a label on the process and emit a policy event. The
-  current scheduler is FIFO and **does not prioritize by class** — promoting to
-  `elevated` does not, today, schedule a process ahead of others.
-- **Quarantine is advisory.** It demotes a process to the `tiny` class and emits
-  an event; it does **not**, by itself, stop the process from being scheduled or
-  from accepting messages. A watchdog or supervisor is expected to react to the
-  event/class. (`pause` is the mechanism that actually removes a process from
-  scheduling.)
+- **Activity classes affect admission order, not preemption.** When more ready
+  tasks are queued than there are worker threads, the scheduler runs the highest
+  activity class first (`system` > `elevated` > `normal` > `tiny` > `paused`),
+  FIFO within a class. But the scheduler is **not preemptive** — a running task
+  holds its worker thread until it returns — so promoting an *already-running*
+  process does not interrupt others, and class only changes outcomes under worker
+  saturation.
+- **Quarantine demotes, it does not stop.** Quarantine sets the `tiny` class and
+  emits a policy event; the scheduler then admits a quarantined process **last**,
+  but it does **not** preempt one that is already running or stop it from
+  accepting messages. To actually halt a process, use `pause`.
 - **Log size is bounded by rotation; the rate quota is not.** Each process's
   active NDJSON log rolls to `<name>.log.1` at 1 MiB (older rotations shift up to
   3, oldest dropped), bounding per-process disk to ~4 MiB. The per-minute
@@ -333,8 +335,8 @@ What each intervention means at the runtime level:
 |---|---|
 | `pause` | Removes the process from scheduling. Tasks submitted while it is paused are **discarded, not queued** (see Semantics). |
 | `resume` | Returns a paused process to the ready queue. |
-| `promote` | **Advisory**: relabels the activity class (e.g. `elevated`) for a bounded TTL and emits an event. The current scheduler does **not** prioritize by class. |
-| `quarantine` | **Advisory**: demotes to the `tiny` class and emits an event. Not a hard kill and does **not** stop scheduling — a watchdog must act on it. |
+| `promote` | Raises the activity class (e.g. `elevated`) for a bounded TTL and emits an event. The scheduler admits higher classes first **at admission** (not preemptively — a running task isn't interrupted). |
+| `quarantine` | Demotes to the `tiny` class and emits an event. The scheduler then admits it **last**, but it is **not** a hard kill and does **not** preempt a running process — use `pause` to actually stop it. |
 | restart | The supervisor terminates the process and starts a fresh incarnation with a **new PID** (no mailbox or per-PID state carried over). |
 
 These act at the **process level**, and that can be application-visible. Pausing

@@ -9,7 +9,39 @@ const registry_mod = @import("registry.zig");
 const Pid = types.Pid;
 const ProcessState = types.ProcessState;
 const PolicyEnvelope = types.PolicyEnvelope;
+const ActivityClass = types.ActivityClass;
 const Registry = registry_mod.Registry;
+
+// warden-zl0: admission priority. The scheduler is cooperative, not preemptive —
+// a running task holds its worker thread until it returns — so activity class
+// affects WHICH ready task starts next when workers are saturated, not the
+// time-slicing of an already-running one.
+pub fn classRank(c: ActivityClass) u8 {
+    return switch (c) {
+        .system => 4,
+        .elevated => 3,
+        .normal => 2,
+        .tiny => 1,
+        .paused => 0,
+    };
+}
+
+// warden-zl0: index of the highest-activity-class task in `items` (FIFO
+// tie-break: the earliest-enqueued among equal class). Caller passes a non-empty
+// slice. Unknown pids are treated as `.normal`.
+pub fn pickHighestClass(items: []const Task, registry: *Registry) usize {
+    var best: usize = 0;
+    var best_rank: u8 = classRank(registry.activityClass(items[0].pid) orelse .normal);
+    var i: usize = 1;
+    while (i < items.len) : (i += 1) {
+        const r = classRank(registry.activityClass(items[i].pid) orelse .normal);
+        if (r > best_rank) {
+            best_rank = r;
+            best = i;
+        }
+    }
+    return best;
+}
 
 // warden-7a1
 /// Default maximum reductions per scheduler slice.
@@ -19,7 +51,7 @@ pub const DEFAULT_MAX_REDUCTIONS: u32 = 2000;
 
 // warden-7a1
 /// A task submitted to the scheduler for execution.
-const Task = struct {
+pub const Task = struct {
     pid: Pid,
     entry_fn: *const fn (ctx: *anyopaque) void,
     ctx: *anyopaque,
@@ -310,8 +342,10 @@ pub const Scheduler = struct {
                 break;
             }
 
-            // Dequeue one task (FIFO).
-            const task = self.task_queue.orderedRemove(0);
+            // warden-zl0: dequeue the highest-activity-class ready task
+            // (admission priority); FIFO within a class.
+            const idx = pickHighestClass(self.task_queue.items, self.registry);
+            const task = self.task_queue.orderedRemove(idx);
 
             // Check if process is paused before running.
             const is_paused = self.paused.contains(task.pid.proc);

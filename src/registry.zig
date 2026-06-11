@@ -123,6 +123,16 @@ pub const Registry = struct {
         return self.map.count();
     }
 
+    // warden-zl0
+    /// Read a process's activity class under the lock (used by the scheduler for
+    /// admission priority). Returns null if the pid is unknown.
+    pub fn activityClass(self: *Registry, pid: Pid) ?types.ActivityClass {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const entry = self.map.getPtr(pid.proc) orelse return null;
+        return entry.policy.activity_class;
+    }
+
     // warden-f19
     /// Set a process's activity class under the lock (used for quarantine).
     /// Leaves promotion_ttl_ms untouched. Returns ProcessNotFound if unknown.
