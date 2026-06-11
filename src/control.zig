@@ -58,6 +58,7 @@ const dispatch_table = [_]DispatchEntry{
     .{ .action = "proc.call", .handler = handlers_proc.handleProcCall },
     .{ .action = "proc.list", .handler = handlers_proc.handleProcList },
     .{ .action = "proc.control", .handler = handlers_control.handleProcControl },
+    .{ .action = "policy.events", .handler = handlers_control.handlePolicyEvents },
     .{ .action = "topology.get", .handler = handlers_topology.handleTopologyGet },
     .{ .action = "logs.stream", .handler = handlers_logs.handleLogsStream },
 };

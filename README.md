@@ -178,10 +178,12 @@ describes the runtime as implemented today, and is explicit about what is
   3, oldest dropped), bounding per-process disk to ~4 MiB. The per-minute
   byte-rate quota (`max_log_bytes_per_min`) is **not** enforced — there is no
   throttle or drop on burst rate.
-- **Policy events are engine-local.** Promote/demote/quarantine record a
-  structured event in the policy engine (from both in-process and control-plane
-  callers), but these are **not yet surfaced in the per-process NDJSON stream** —
-  external orchestrators cannot observe them through logs today.
+- **Policy events are exposed via the control plane.** Promote/demote/quarantine
+  record a structured event in the policy engine (from both in-process and
+  control-plane callers); the `policy.events` control RPC returns them per beam,
+  so external orchestrators can poll for control-plane policy actions. They are
+  **not** interleaved into the per-process NDJSON stream (that would need a
+  control→logger path).
 
 ### Logging durability
 

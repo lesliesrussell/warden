@@ -1284,3 +1284,44 @@ test "control server (warden-qj2): proc.control quarantine emits a policy event"
     }
     try std.testing.expect(found);
 }
+
+// warden-2rb
+// policy.events surfaces recorded policy actions to external callers.
+test "control server (warden-2rb): policy.events returns recorded events" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const pid = try rt.registry.spawn(.native_worker, null, .{});
+
+    const socket_path = "/tmp/warden_ctrl_2rb.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    // Quarantine the process (records a policy event).
+    {
+        const req = try std.fmt.allocPrint(allocator,
+            "{{\"req_id\":\"e1\",\"action\":\"proc.control\",\"payload\":{{\"pid\":\"42/{d}\",\"op\":\"quarantine\",\"reason\":\"noisy\"}}}}",
+            .{pid.proc});
+        defer allocator.free(req);
+        const resp = try ctlRpc(allocator, socket_path, req);
+        defer allocator.free(resp);
+    }
+
+    // Fetch events via the control RPC.
+    const resp = try ctlRpc(allocator, socket_path, "{\"req_id\":\"e2\",\"action\":\"policy.events\",\"payload\":{}}");
+    defer allocator.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expect(obj.get("ok").?.bool);
+    const events = obj.get("payload").?.object.get("events").?.array;
+    var found = false;
+    for (events.items) |ev| {
+        const e = ev.object;
+        if (std.mem.eql(u8, e.get("action").?.string, "quarantine") and
+            std.mem.eql(u8, e.get("reason").?.string, "noisy")) found = true;
+    }
+    try std.testing.expect(found);
+}
