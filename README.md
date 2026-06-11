@@ -441,12 +441,6 @@ zig build          # compile wardenctl + runtime library
 
 ---
 
-## Specification
-
-[`warden-runtime-spec.md`](warden-runtime-spec.md)
-
----
-
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
