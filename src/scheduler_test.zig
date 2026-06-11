@@ -242,3 +242,31 @@ test "tick: expires timed-out waiter and moves to ready" {
     }
     try std.testing.expect(found);
 }
+
+// warden-zl0
+fn zl0Noop(_: *anyopaque) void {}
+
+test "scheduler admission picks highest activity class first" {
+    var reg = Registry.init(std.testing.allocator, 1);
+    defer reg.deinit();
+    const p_normal = try reg.spawn(.native_worker, null, .{});
+    const p_other = try reg.spawn(.native_worker, null, .{});
+
+    var dummy: u8 = 0;
+    const items = [_]scheduler_mod.Task{
+        .{ .pid = p_normal, .entry_fn = zl0Noop, .ctx = &dummy, .reductions = 0 },
+        .{ .pid = p_other, .entry_fn = zl0Noop, .ctx = &dummy, .reductions = 0 },
+    };
+
+    // elevated (index 1) outranks normal (index 0)
+    try reg.setActivityClass(p_other, .elevated);
+    try std.testing.expectEqual(@as(usize, 1), scheduler_mod.pickHighestClass(&items, &reg));
+
+    // quarantined (.tiny) is deprioritized below normal -> index 0 wins
+    try reg.setActivityClass(p_other, .tiny);
+    try std.testing.expectEqual(@as(usize, 0), scheduler_mod.pickHighestClass(&items, &reg));
+
+    // equal class -> FIFO tie-break (earliest index)
+    try reg.setActivityClass(p_other, .normal);
+    try std.testing.expectEqual(@as(usize, 0), scheduler_mod.pickHighestClass(&items, &reg));
+}
