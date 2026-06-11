@@ -102,6 +102,99 @@ failure.
 
 ---
 
+## Semantics
+
+This section is the contract — the behavior you can write tests against. It
+describes the runtime as implemented today, and is explicit about what is
+*enforced* versus what is currently an *advisory* label.
+
+### Message ordering and delivery
+
+- Each process has one mailbox: a single FIFO queue. Messages from a given
+  sender to a given recipient are delivered in send order (**per-sender FIFO**);
+  messages from different senders interleave in arrival order. There is no
+  priority reordering of the queue.
+- `recv` is **selective**: it scans pending messages oldest-first and returns
+  the first that matches.
+- `send` **never blocks**. It returns `error.NoSuchProcess` if the recipient's
+  mailbox no longer exists, or `error.MailboxFull` if the mailbox is at its
+  count/byte limit and the overflow strategy rejects the message.
+- `call(pid, msg, timeout)` sends, then polls its *own* mailbox for a reply
+  correlated by message id, returning `error.Timeout` if none arrives.
+- Delivery is **at-most-once and best-effort**: no acknowledgement, retry, or
+  redelivery. A message enqueued but never received (e.g. the recipient exits
+  first) is simply dropped.
+
+### Process exit and restart
+
+- Mailboxes are **ephemeral**. When a process exits, its mailbox and any pending
+  messages are discarded. Nothing is forwarded to a replacement.
+- A restart is a **new process with a new PID**, not a resumed one; the old PID
+  transitions to a terminal state.
+- An in-flight `call` to a process that exits or restarts **does not detect the
+  death** — it simply times out (`error.Timeout`). It never rebinds to the new
+  incarnation, and Warden never redelivers the original message.
+- Consequently, if a request must survive a worker restart, the **caller** must
+  retry and the work must be safe to repeat.
+
+### Storage across restart
+
+- Storage namespaces are keyed by PID: `<base>/<ns>/<beam>/<proc>/…`. Because a
+  restart yields a **new PID**, the new incarnation gets a fresh, empty namespace
+  view — including `proc-state`.
+- **`proc-state` is therefore NOT automatically reattached across a restart.**
+  Its bytes persist on disk under the old PID's path, but the new incarnation
+  cannot see them through its own namespace. Durable state that must survive a
+  restart has to be re-keyed and reloaded by the application (e.g. under a stable
+  logical key in `shared-vol`), not assumed.
+- `proc-temp` is scratch space — treat it as non-durable. `proc-cache` is
+  evictable and must never be relied on for correctness.
+
+### Quotas, classes, and quarantine — enforced vs. advisory
+
+- **Mailbox quota is enforced.** `max_mailbox_len` / `max_mailbox_bytes` are
+  applied on every enqueue via the configured overflow strategy
+  (`reject_new`, `drop_oldest_low`, `escalate_supervisor`, `throttle_sender`);
+  overflow surfaces to the sender as `error.MailboxFull` (or drops a
+  low-priority message under `drop_oldest_low`).
+- **Activity classes are advisory.** Classes (`tiny`/`normal`/`elevated`/…) and
+  `promote`/`demote` set a label on the process and emit a policy event. The
+  current scheduler is FIFO and **does not prioritize by class** — promoting to
+  `elevated` does not, today, schedule a process ahead of others.
+- **Quarantine is advisory.** It demotes a process to the `tiny` class and emits
+  an event; it does **not**, by itself, stop the process from being scheduled or
+  from accepting messages. A watchdog or supervisor is expected to react to the
+  event/class. (`pause` is the mechanism that actually removes a process from
+  scheduling.)
+- **Log-volume quota is not enforced.** `max_log_bytes_per_min` is carried in the
+  policy envelope but not applied by the runtime; there is no rotation,
+  compaction, or dropping. Log files grow unbounded — manage them with external
+  tooling (e.g. `logrotate`).
+
+### Logging durability
+
+- Per-process NDJSON is written through a **buffered** writer and is
+  best-effort: a hard crash may lose the unflushed tail. The log is an
+  operational event stream, not a transactional audit record.
+- Correlation/trace IDs are a **convention**: the SDK helpers stamp them, but
+  propagating IDs across process boundaries is the application's responsibility.
+  Warden does not guarantee a message and its log events share an ID unless your
+  code sets it.
+
+### Control plane
+
+- The control socket has **no authentication or authorization**: any process
+  that can open `~/.warden/ctrl.sock` has full control authority. The model is
+  **local, single-tenant by design** — secure it with filesystem permissions.
+- Control operations are best-effort and applied per current process state
+  (pausing an already-paused process is a no-op). Concurrent operations on the
+  same process are serialized by the registry lock with **no conflict
+  detection** (last writer wins).
+- `pause` removes a process from scheduling and **discards tasks submitted while
+  it is paused** — it is not a freeze-and-resume of in-flight work.
+
+---
+
 ## Foreign workers and the Python SDK
 
 Supervising foreign-language workers as first-class processes is one of Warden's
@@ -151,9 +244,22 @@ field on `proc.spawn` (default `permanent`):
 | `temporary` | Never restart |
 
 A runaway guard caps restarts at **3 within a 5s window** per worker; a worker
-that exceeds it is retired and logged (`restart` / give-up events in its NDJSON
-stream). The reaper's poll cadence (default 50ms) is adjustable on the fly per
-beam via the `beam.reaper` RPC or `wardenctl renice <beam> <ms>`.
+that exceeds it is retired (not respawned) and logged (`restart` / give-up
+events in its NDJSON stream). A retired worker's PID is terminal: its mailbox is
+reclaimed, so subsequent `send`/`call` to it fail (`error.NoSuchProcess` /
+`error.Timeout`) rather than silently queuing. **A live supervisor does not
+imply a live child** — check the child's state, not just the tree root. The
+reaper's poll cadence (default 50ms) is adjustable on the fly per beam via the
+`beam.reaper` RPC or `wardenctl renice <beam> <ms>`.
+
+### Failure matrix
+
+| Failure | What the bridge does | What the caller observes |
+|---|---|---|
+| Worker exits / socket drops | Reader detects EOF, marks the worker crashed; reaper respawns it as a **new PID** per restart policy (or retires it past the runaway guard) | In-flight `call` times out; messages in the old mailbox are lost; no redelivery |
+| Worker hangs (no progress, socket open) | **Not detected by the bridge** — a watchdog reading `last_active_at` must notice and intervene (`pause`/`kill`) | `call` times out; nothing happens automatically without a watchdog |
+| Protocol violation (malformed JSON, unknown frame kind, missing fields, stray reply id) | Frame is logged/dropped; the connection **stays open**; the worker is **not** killed or quarantined | No effect; a bad/unmatched reply is simply never delivered to a caller |
+| Version skew (runtime vs SDK) | **No version negotiation** — the one-way handshake carries no version; mismatches surface only as per-frame field errors | Undefined; depends on which frames the worker emits |
 
 ---
 
@@ -212,18 +318,19 @@ What each intervention means at the runtime level:
 
 | Operation | Runtime effect |
 |---|---|
-| `pause` | Process stops being scheduled; queued and in-flight-from-its-view work does not progress until resumed. |
+| `pause` | Removes the process from scheduling. Tasks submitted while it is paused are **discarded, not queued** (see Semantics). |
 | `resume` | Returns a paused process to the ready queue. |
-| `promote` | Raises the process's activity class (e.g. to `elevated`) for a bounded TTL, then it reverts. |
-| `quarantine` | Policy-defined throttling: moves the process to the `tiny` activity class (minimal scheduling/quota share). It is not a hard kill. |
-| restart | The supervisor terminates the process and starts a fresh incarnation with a **new PID**. |
+| `promote` | **Advisory**: relabels the activity class (e.g. `elevated`) for a bounded TTL and emits an event. The current scheduler does **not** prioritize by class. |
+| `quarantine` | **Advisory**: demotes to the `tiny` class and emits an event. Not a hard kill and does **not** stop scheduling — a watchdog must act on it. |
+| restart | The supervisor terminates the process and starts a fresh incarnation with a **new PID** (no mailbox or per-PID state carried over). |
 
 These act at the **process level**, and that can be application-visible. Pausing
-a worker mid-request delays that request; restarting one abandons whatever it had
-in flight and gives it a new PID. The session supervisor's own PID is unaffected
-by intervening on a child, but "the supervisor survived" is not the same as "the
-user saw nothing" — whether a given intervention is transparent depends on how
-the application handles dropped, delayed, or replayed work.
+a worker **drops the work queued for it** (it is not buffered for later);
+restarting one abandons whatever it had in flight and gives it a new PID. The
+session supervisor's own PID is unaffected by intervening on a child, but "the
+supervisor survived" is not the same as "the user saw nothing" — whether a given
+intervention is transparent depends on how the application handles dropped,
+delayed, or replayed work. See **Semantics** for the precise contract.
 
 ---
 
@@ -329,7 +436,10 @@ Commands:
 ```
 
 The runtime exposes a Unix socket at `~/.warden/ctrl.sock` by default (override
-with `$WARDEN_CTRL_SOCKET` or `--socket`).
+with `$WARDEN_CTRL_SOCKET` or `--socket`). **There is no authentication** — any
+peer that can open the socket has full control authority. The model is local and
+single-tenant; secure it with filesystem permissions. See
+[Semantics → Control plane](#semantics).
 
 ---
 
@@ -343,6 +453,22 @@ architectures:
 | Code assistant | `src/topology_code_assistant.zig` | planner + executor_sup (shell/lsp/file) + memory + watchdog |
 | Research agent | `src/topology_research_agent.zig` | ranker + retriever_sup (web/vector/doc) + synthesizer + citations |
 | ETL pipeline | `src/topology_etl.zig` | extractor → transformer → loader (rest_for_one, checkpointed) |
+
+A restart strategy only defines *which* processes are replaced — it does not
+make the work correct. Given the [Semantics](#semantics) above (new PID on
+restart, no `proc-state` reattach, no redelivery), each tree carries
+application-level obligations:
+
+- **ETL (`rest_for_one`)** — a transformer failure restarts transformer **and**
+  loader (not the extractor). For this to not corrupt the run, the **loader must
+  be idempotent** and the **transformer must checkpoint batch progress** to a
+  stable, non-PID-keyed location (e.g. `shared-vol`), since the restarted
+  incarnation starts with an empty `proc-state`.
+- **Code assistant / research agent** — decide per child which failures are
+  tolerable vs. fatal: a tool worker dying and being replaced is fine (the
+  planner retries), but a persistent memory-service failure usually warrants
+  failing the session fast rather than continuing against missing state. Warden
+  gives you the restart mechanism; choosing the correctness envelope is yours.
 
 ---
 
@@ -390,10 +516,10 @@ Standard OTP strategies, adopted by name:
 
 | Namespace | Lifecycle |
 |---|---|
-| `proc-temp` | Deleted on process exit |
-| `proc-cache` | Evictable by quota; no correctness guarantee |
-| `proc-state` | Durable across restart per policy |
-| `shared-vol` | Named shared datasets; ACL + volume quota governed |
+| `proc-temp` | Scratch. `cleanupTemp()` exists but is **not auto-invoked on exit** today — treat as non-durable, not auto-deleted. |
+| `proc-cache` | Recomputable. `evictCache()` exists but is **not auto-invoked** — never rely on its contents. |
+| `proc-state` | Persists on disk, but keyed by PID — **not auto-reattached after restart** (new PID = new namespace). See [Semantics](#semantics). |
+| `shared-vol` | Named shared datasets; access gated by explicit per-view grants (`grantVolume`). |
 
 ---
 
