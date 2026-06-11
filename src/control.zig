@@ -57,8 +57,11 @@ fn randomU32(io: std.Io) u32 {
 // warden-y3s
 // Responder centralizes the control-plane response envelope so handlers stop
 // hand-rolling `{"req_id":..,"ok":..,"error":..,"payload":..}` at every call
-// site. Behavior-preserving: req_id and error strings are still interpolated
-// raw — the JSON-escaping fix is tracked separately in warden-veb.
+// site.
+// warden-veb: req_id and error messages are JSON-escaped here — the single spot
+// the whole control plane funnels through — so a req_id/error/action containing
+// a quote or control char can no longer emit malformed JSON. Payload fragments
+// are pre-rendered valid JSON by callers and pass through verbatim.
 const Responder = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -67,21 +70,27 @@ const Responder = struct {
 
     /// Frame an error response: ok=false, the given message, null payload.
     fn err(self: Responder, msg: []const u8) !void {
-        const resp = try std.fmt.allocPrint(self.allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":false,\"error\":\"{s}\",\"payload\":null}}",
-            .{ self.req_id, msg });
-        defer self.allocator.free(resp);
-        try writeFrame(self.io, self.stream, resp);
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        const w = &buf.writer;
+        try w.writeAll("{\"req_id\":");
+        try writeJsonEscapedString(w, self.req_id);
+        try w.writeAll(",\"ok\":false,\"error\":");
+        try writeJsonEscapedString(w, msg);
+        try w.writeAll(",\"payload\":null}");
+        try writeFrame(self.io, self.stream, buf.writer.buffered());
     }
 
     /// Frame a success response wrapping an already-rendered payload fragment.
     /// Pass "null" for an empty payload, or use okEmpty().
     fn ok(self: Responder, payload_json: []const u8) !void {
-        const resp = try std.fmt.allocPrint(self.allocator,
-            "{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":{s}}}",
-            .{ self.req_id, payload_json });
-        defer self.allocator.free(resp);
-        try writeFrame(self.io, self.stream, resp);
+        var buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer buf.deinit();
+        const w = &buf.writer;
+        try self.okPrefix(w);
+        try w.writeAll(payload_json);
+        try self.okSuffix(w);
+        try writeFrame(self.io, self.stream, buf.writer.buffered());
     }
 
     /// Frame a success response with a null payload.
@@ -90,11 +99,13 @@ const Responder = struct {
     }
 
     /// Write the success-envelope prefix up to `"payload":` into a caller-owned
-    /// writer, for large/streamed payloads that should not be copied through
-    /// allocPrint. Caller appends the payload value, then okSuffix(), then frames
-    /// the buffer once via writeFrame.
+    /// writer, for large/streamed payloads that should not be copied through an
+    /// intermediate buffer. Caller appends the payload value, then okSuffix(),
+    /// then frames the buffer once via writeFrame.
     fn okPrefix(self: Responder, w: anytype) !void {
-        try w.print("{{\"req_id\":\"{s}\",\"ok\":true,\"error\":null,\"payload\":", .{self.req_id});
+        try w.writeAll("{\"req_id\":");
+        try writeJsonEscapedString(w, self.req_id);
+        try w.writeAll(",\"ok\":true,\"error\":null,\"payload\":");
     }
 
     fn okSuffix(_: Responder, w: anytype) !void {

@@ -1179,3 +1179,56 @@ test "control server (warden-6a1): logs.stream pid and file errors" {
     try expectCtlError(allocator, socket_path,
         "{\"req_id\":\"g3\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"42/999999\"}}", "log file not found");
 }
+
+// warden-veb
+// Regression: a req_id containing a double-quote and backslash must be
+// JSON-escaped in the response envelope. Before the fix it was interpolated
+// raw, producing malformed JSON that no client could parse.
+test "control server (warden-veb): req_id with special chars is JSON-escaped" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_veb_escape.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    // Wire req_id value is: a"b\c  (quote and backslash embedded).
+    const req = "{\"req_id\":\"a\\\"b\\\\c\",\"action\":\"beam.list\",\"payload\":{}}";
+    const resp = try ctlRpc(allocator, socket_path, req);
+    defer allocator.free(resp);
+
+    // If req_id were interpolated raw, the response would be malformed and this
+    // parse would fail; escaping keeps it well-formed JSON.
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expect(obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("a\"b\\c", obj.get("req_id").?.string);
+}
+
+// warden-veb
+// An unknown action containing a quote flows into the error message, which must
+// also be escaped (the error path funnels through the same Responder).
+test "control server (warden-veb): error message with special chars is escaped" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_veb_errescape.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    // action value is: bad"action
+    const req = "{\"req_id\":\"e1\",\"action\":\"bad\\\"action\",\"payload\":{}}";
+    const resp = try ctlRpc(allocator, socket_path, req);
+    defer allocator.free(resp);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expect(!obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("unknown action: bad\"action", obj.get("error").?.string);
+}
