@@ -7,6 +7,30 @@ import os
 import uuid
 
 
+# warden-6f6: bridge wire-protocol version this SDK speaks. Must equal the
+# runtime's advertised protocol_version (see bridge.zig protocol_version).
+SUPPORTED_PROTOCOL = 1
+
+
+class WardenProtocolError(RuntimeError):
+    """Raised when the runtime's bridge protocol version is incompatible."""
+
+
+def _validate_handshake(hs: dict) -> None:
+    """Fail fast on bridge protocol-version skew.
+
+    The runtime advertises ``protocol_version`` in its handshake frame. If it
+    differs from what this SDK supports, framing or semantics may diverge
+    silently, so we raise instead of proceeding.
+    """
+    ver = hs.get("protocol_version")
+    if ver != SUPPORTED_PROTOCOL:
+        raise WardenProtocolError(
+            f"Warden runtime speaks bridge protocol {ver!r}, but this SDK "
+            f"supports {SUPPORTED_PROTOCOL}. Upgrade the matching component."
+        )
+
+
 class BeamCtx:
     """Low-level connection to the Warden runtime over a Unix socket."""
 
@@ -22,7 +46,10 @@ class BeamCtx:
                 "Start the runtime first, or set WARDEN_SOCKET to the correct socket path."
             ) from None
         hs = self._recv_frame()
+        _validate_handshake(hs)  # warden-6f6: reject protocol skew before use
         self.pid = hs["pid"]
+        self.protocol_version = hs.get("protocol_version")
+        self.capabilities = hs.get("capabilities", [])
 
     # ------------------------------------------------------------------ recv
 

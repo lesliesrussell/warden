@@ -184,6 +184,25 @@ fn readerThread(rc: ReaderCtx) void {
 
 // warden-eet
 /// Unix socket bridge between the Warden runtime and a foreign (e.g. Python) worker.
+// warden-6f6: bridge wire-protocol version. The runtime advertises it (plus the
+// frame kinds it supports) in the handshake so a foreign-worker SDK can fail
+// fast on version skew instead of mis-framing silently. Bump on any breaking
+// change to the bridge frame protocol.
+pub const protocol_version: u32 = 1;
+
+// warden-6f6
+/// Build the handshake frame sent to a foreign worker on connect: protocol
+/// version, the worker's PID, the socket path, and the supported frame kinds.
+/// Pure (testable) — the only dynamic input is pid + socket_path.
+pub fn buildHandshakeFrame(allocator: std.mem.Allocator, pid: Pid, socket_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "{{\"kind\":\"handshake\",\"protocol_version\":{d},\"pid\":\"{d}/{d}\"," ++
+            "\"socket\":\"{s}\",\"capabilities\":[\"send\",\"reply\",\"log\",\"fs_read\",\"fs_write\"]}}",
+        .{ protocol_version, pid.beam, pid.proc, socket_path },
+    );
+}
+
 pub const ForeignBridge = struct {
     allocator: std.mem.Allocator,
     runtime: *Runtime,
@@ -315,12 +334,8 @@ pub const ForeignBridge = struct {
         const accepted = try self.server.accept(self.runtime.io);
         self.conn = accepted;
 
-        // Send handshake frame.
-        const handshake = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"kind\":\"handshake\",\"pid\":\"{d}/{d}\",\"socket\":\"{s}\"}}",
-            .{ self.pid.beam, self.pid.proc, self.socket_path },
-        );
+        // Send handshake frame (warden-6f6: now carries protocol_version + capabilities).
+        const handshake = try buildHandshakeFrame(self.allocator, self.pid, self.socket_path);
         defer self.allocator.free(handshake);
         try writeFrame(self.runtime.io, accepted, handshake);
 
