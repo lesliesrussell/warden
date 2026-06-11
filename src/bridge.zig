@@ -407,6 +407,20 @@ pub const ForeignBridge = struct {
 
     // warden-eet
     /// Dispatch a parsed frame by its "kind" field.
+    // warden-19i: validate a worker's reported protocol version (the reverse of
+    // the runtime advertising its version in the handshake). On skew, record a
+    // warning on the worker's process log so the mismatch is observable; the
+    // frame stream is otherwise permissive (the worker SDK fails fast itself).
+    fn handleHello(self: *ForeignBridge, obj: std.json.ObjectMap) void {
+        const wv: i64 = switch (obj.get("protocol_version") orelse .null) {
+            .integer => |n| n,
+            else => -1,
+        };
+        if (wv != @as(i64, protocol_version)) {
+            self.ctx.warning("foreign worker reported incompatible bridge protocol version", null) catch {};
+        }
+    }
+
     fn handleFrame(self: *ForeignBridge, kind: []const u8, obj: std.json.ObjectMap) !void {
         const conn = self.conn orelse return error.NotConnected;
 
@@ -420,6 +434,9 @@ pub const ForeignBridge = struct {
             try self.handleFsWrite(conn, obj);
         } else if (std.mem.eql(u8, kind, "fs_read")) {
             try self.handleFsRead(conn, obj);
+        } else if (std.mem.eql(u8, kind, "hello")) {
+            // warden-19i: worker reports its bridge protocol version on connect.
+            self.handleHello(obj);
         } else {
             // Unknown kind — log and skip.
             self.ctx.note("unknown bridge frame kind", null) catch {};

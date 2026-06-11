@@ -31,6 +31,12 @@ def _validate_handshake(hs: dict) -> None:
         )
 
 
+def _hello_frame() -> dict:
+    """warden-19i: the worker's version report, sent to the runtime right after
+    connect so the runtime can observe (and log) protocol skew from its side."""
+    return {"kind": "hello", "protocol_version": SUPPORTED_PROTOCOL}
+
+
 class BeamCtx:
     """Low-level connection to the Warden runtime over a Unix socket."""
 
@@ -50,6 +56,7 @@ class BeamCtx:
         self.pid = hs["pid"]
         self.protocol_version = hs.get("protocol_version")
         self.capabilities = hs.get("capabilities", [])
+        self._send_frame(_hello_frame())  # warden-19i: report our version back
 
     # ------------------------------------------------------------------ recv
 
