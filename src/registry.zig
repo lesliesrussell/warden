@@ -113,4 +113,37 @@ pub const Registry = struct {
         if (entry.state != .dead) return RegistryError.ProcessNotDead;
         _ = self.map.remove(pid.proc);
     }
+
+    // warden-f19
+    /// Number of registered processes (acquires the lock). Lets callers read the
+    /// count without reaching into `mutex`/`map` directly.
+    pub fn count(self: *Registry) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.map.count();
+    }
+
+    // warden-f19
+    /// Set a process's activity class under the lock (used for quarantine).
+    /// Leaves promotion_ttl_ms untouched. Returns ProcessNotFound if unknown.
+    /// Safe where `lookup` is not: it never hands a map pointer back to the
+    /// caller, so the mutation cannot race a concurrent spawn/remove the way a
+    /// lookup-then-mutate would.
+    pub fn setActivityClass(self: *Registry, pid: Pid, class: types.ActivityClass) RegistryError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const entry = self.map.getPtr(pid.proc) orelse return RegistryError.ProcessNotFound;
+        entry.policy.activity_class = class;
+    }
+
+    // warden-f19
+    /// Set a process's activity class and promotion TTL together under the lock
+    /// (used for promote). Returns ProcessNotFound if unknown.
+    pub fn setPromotion(self: *Registry, pid: Pid, class: types.ActivityClass, ttl_ms: ?u64) RegistryError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const entry = self.map.getPtr(pid.proc) orelse return RegistryError.ProcessNotFound;
+        entry.policy.activity_class = class;
+        entry.policy.promotion_ttl_ms = ttl_ms;
+    }
 };
