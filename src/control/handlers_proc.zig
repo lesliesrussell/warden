@@ -96,7 +96,13 @@ pub fn handleProcSpawn(h: *const HandlerCtx) !void {
                 return r.err("invalid restart");
         }
     }
-    const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid, strategy);
+    // warden-dpl: optional stable proc_state key so the worker reattaches its
+    // durable state across restart (default: PID-keyed, clean slate).
+    var state_key: ?[]const u8 = null;
+    if (obj.get("state_key")) |skv| {
+        if (skv == .string) state_key = skv.string;
+    }
+    const pid = try sup.spawnWorkerUnder(cmd.items, log_dir, store_base, parent_pid, strategy, state_key);
 
     const pid_str = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ pid.beam, pid.proc });
     defer allocator.free(pid_str);

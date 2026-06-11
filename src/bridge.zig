@@ -200,6 +200,8 @@ pub const ForeignBridge = struct {
     // warden-dmg: how the child exited, classified from its Term during teardown.
     last_exit: @import("restart.zig").ExitClass,
     ctx: Ctx,
+    // warden-dpl: owned stable proc_state key (ctx.storage borrows it); null = PID-keyed.
+    state_key: ?[]u8,
     write_mutex: sync.Mutex,
     // warden-3cn: arena for reply message strings; freed on deinit
     msg_arena: std.heap.ArenaAllocator,
@@ -213,7 +215,7 @@ pub const ForeignBridge = struct {
         log_dir: []const u8,
         storage_base: []const u8,
     ) !ForeignBridge {
-        return initWithParent(allocator, runtime, cmd, log_dir, storage_base, null);
+        return initWithParent(allocator, runtime, cmd, log_dir, storage_base, null, null);
     }
 
     // warden-3cn
@@ -224,8 +226,14 @@ pub const ForeignBridge = struct {
         log_dir: []const u8,
         storage_base: []const u8,
         parent_pid: ?Pid,
+        state_key: ?[]const u8,
     ) !ForeignBridge {
         _ = cmd; // stored in start() via child_proc field — kept here for API symmetry
+
+        // warden-dpl: own a copy of the stable state key so ctx.storage can borrow
+        // it for the bridge's lifetime (the caller's slice may be transient).
+        const state_key_owned: ?[]u8 = if (state_key) |sk| try allocator.dupe(u8, sk) else null;
+        errdefer if (state_key_owned) |sk| allocator.free(sk);
 
         // Allocate a PID for the foreign worker.
         const pid = try runtime.registry.spawn(.foreign_worker, parent_pid, .{});
@@ -246,7 +254,7 @@ pub const ForeignBridge = struct {
         const server = try addr.listen(runtime.io, .{});
 
         // Build Ctx for the bridge to use when dispatching API calls.
-        const ctx = try Ctx.init(runtime, pid, log_dir, storage_base);
+        const ctx = try Ctx.initWithStateKey(runtime, pid, log_dir, storage_base, state_key_owned);
 
         return ForeignBridge{
             .allocator = allocator,
@@ -261,6 +269,7 @@ pub const ForeignBridge = struct {
             .crashed = std.atomic.Value(bool).init(false),
             .last_exit = .normal,
             .ctx = ctx,
+            .state_key = state_key_owned,
             .write_mutex = .{},
             .msg_arena = std.heap.ArenaAllocator.init(allocator),
         };
@@ -279,6 +288,8 @@ pub const ForeignBridge = struct {
         self.allocator.free(self.socket_path);
         // Deinit ctx.
         self.ctx.deinit();
+        // warden-dpl: free the owned stable state key (ctx only borrowed it).
+        if (self.state_key) |sk| self.allocator.free(sk);
         // warden-3cn: free all reply message strings allocated in the arena
         self.msg_arena.deinit();
     }
@@ -638,6 +649,8 @@ pub const ManagedWorker = struct {
     cmd: [][]u8,
     log_dir: []u8,
     storage_base: []u8,
+    // warden-dpl: owned stable proc_state key, reused on every respawn.
+    state_key: ?[]u8,
     parent_pid: ?Pid,
     strategy: restart_mod.Strategy,
     // Runaway guard (per worker).
@@ -650,6 +663,7 @@ pub const ManagedWorker = struct {
         allocator.free(self.cmd);
         allocator.free(self.log_dir);
         allocator.free(self.storage_base);
+        if (self.state_key) |sk| allocator.free(sk);
         self.restart_timestamps.deinit(allocator);
     }
 };
@@ -730,7 +744,7 @@ pub const BridgeSupervisor = struct {
         log_dir: []const u8,
         storage_base: []const u8,
     ) !Pid {
-        return self.spawnWorkerUnder(cmd, log_dir, storage_base, null, .permanent);
+        return self.spawnWorkerUnder(cmd, log_dir, storage_base, null, .permanent, null);
     }
 
     // warden-3cn, warden-dmg
@@ -742,6 +756,7 @@ pub const BridgeSupervisor = struct {
         storage_base: []const u8,
         parent_pid: ?Pid,
         strategy: restart_mod.Strategy,
+        state_key: ?[]const u8,
     ) !Pid {
         const w = try self.allocator.create(ManagedWorker);
         errdefer self.allocator.destroy(w);
@@ -755,10 +770,13 @@ pub const BridgeSupervisor = struct {
         errdefer self.allocator.free(log_owned);
         const store_owned = try self.allocator.dupe(u8, storage_base);
         errdefer self.allocator.free(store_owned);
+        // warden-dpl: own the stable state key for the worker's lifetime (reused on respawn).
+        const state_key_owned: ?[]u8 = if (state_key) |sk| try self.allocator.dupe(u8, sk) else null;
+        errdefer if (state_key_owned) |sk| self.allocator.free(sk);
 
         const bridge = try self.allocator.create(ForeignBridge);
         errdefer self.allocator.destroy(bridge);
-        bridge.* = try ForeignBridge.initWithParent(self.allocator, self.runtime, cmd, log_dir, storage_base, parent_pid);
+        bridge.* = try ForeignBridge.initWithParent(self.allocator, self.runtime, cmd, log_dir, storage_base, parent_pid, state_key);
         errdefer bridge.deinit();
         try bridge.start(cmd);
 
@@ -767,6 +785,7 @@ pub const BridgeSupervisor = struct {
             .cmd = cmd_owned,
             .log_dir = log_owned,
             .storage_base = store_owned,
+            .state_key = state_key_owned,
             .parent_pid = parent_pid,
             .strategy = strategy,
             .restart_timestamps = .empty,
@@ -874,7 +893,7 @@ pub const BridgeSupervisor = struct {
             return;
         };
         nb.* = ForeignBridge.initWithParent(
-            self.allocator, self.runtime, w.cmd, w.log_dir, w.storage_base, w.parent_pid,
+            self.allocator, self.runtime, w.cmd, w.log_dir, w.storage_base, w.parent_pid, w.state_key,
         ) catch {
             self.allocator.destroy(nb);
             w.retired = true;

@@ -242,6 +242,20 @@ pub const Ctx = struct {
         log_dir: []const u8,
         storage_base: []const u8,
     ) !Ctx {
+        return initWithStateKey(runtime, pid, log_dir, storage_base, null);
+    }
+
+    // warden-dpl
+    /// Like init, but with an opt-in stable proc_state key, so the process's
+    /// durable state survives restart: a new PID with the same key reattaches.
+    /// `state_key` is borrowed — it must outlive the returned Ctx.
+    pub fn initWithStateKey(
+        runtime: *Runtime,
+        pid: Pid,
+        log_dir: []const u8,
+        storage_base: []const u8,
+        state_key: ?[]const u8,
+    ) !Ctx {
         // Open (or create) the log directory. warden-lmm: fs via std.Io.
         std.Io.Dir.cwd().createDirPath(runtime.io, log_dir) catch {};
         const dir = try std.Io.Dir.cwd().openDir(runtime.io, log_dir, .{});
@@ -253,12 +267,13 @@ pub const Ctx = struct {
         try pl.initInPlace(runtime.io, runtime.allocator, runtime.beam_id, pid.proc, dir);
         errdefer pl.deinit();
 
-        const sv = try StorageView.init(
+        const sv = try StorageView.initWithStateKey(
             runtime.io,
             runtime.allocator,
             storage_base,
             pid,
             PolicyEnvelope{},
+            state_key,
         );
         // sv.deinit() can be called if later steps fail;
 
