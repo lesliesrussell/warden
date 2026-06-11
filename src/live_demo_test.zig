@@ -97,6 +97,7 @@ test "live demo: topology and messaging" {
         store_path,
         sup_pid,
         .permanent,
+        null,
     );
 
     // spawn web_server as child of demo_supervisor
@@ -106,6 +107,7 @@ test "live demo: topology and messaging" {
         store_path,
         sup_pid,
         .permanent,
+        null,
     );
 
     // ── 1. verify both workers appear in proc.list ────────────────────────────

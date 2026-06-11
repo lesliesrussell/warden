@@ -85,7 +85,7 @@ test "permanent worker respawns with a new pid after a crash" {
 
     const cmd = [_][]const u8{ "python3", script };
     // spawnWorkerUnder blocks until the worker connects + handshake is sent.
-    const pid1 = sup.spawnWorkerUnder(&cmd, base, base, null, .permanent) catch return error.SkipZigTest;
+    const pid1 = sup.spawnWorkerUnder(&cmd, base, base, null, .permanent, null) catch return error.SkipZigTest;
 
     // Send the message that makes the worker exit(1). Locked delivery.
     _ = try sup.deliver(pid1, .{
@@ -145,7 +145,7 @@ test "reaper reclaims the old incarnation's registry entry + mailbox after resta
     _ = sup.renice(10);
 
     const cmd = [_][]const u8{ "python3", script };
-    const pid1 = sup.spawnWorkerUnder(&cmd, base, base, null, .permanent) catch return error.SkipZigTest;
+    const pid1 = sup.spawnWorkerUnder(&cmd, base, base, null, .permanent, null) catch return error.SkipZigTest;
     // The bridge allocated a registry entry + mailbox for pid1.
     try std.testing.expect(rt.getMailbox(pid1) != null);
 

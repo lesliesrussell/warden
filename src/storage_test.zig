@@ -232,3 +232,53 @@ test "invalid path rejected" {
     try std.testing.expectError(StorageError.InvalidPath, tv.view.read(.proc_temp, "../escape.txt"));
     try std.testing.expectError(StorageError.InvalidPath, tv.view.read(.proc_temp, "/absolute"));
 }
+
+// warden-dpl
+// proc-state must reattach across a PID change when an opt-in stable state_key
+// is supplied — the restart-survival contract. With the default (PID-keyed,
+// state_key=null) a new PID sees an empty namespace.
+test "proc-state reattaches across PID change via stable state_key" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try testutil.tmpAbs(&path_buf, &tmp);
+    const base_owned = try allocator.dupe(u8, base);
+    defer allocator.free(base_owned);
+
+    const pid_a = Pid{ .beam = 1, .proc = 100 };
+    const pid_b = Pid{ .beam = 1, .proc = 200 }; // restarted incarnation: new PID
+
+    // First incarnation writes durable state under the stable key "svc".
+    var v1 = try StorageView.initWithStateKey(std.testing.io, allocator, base_owned, pid_a, defaultPolicy(), "svc");
+    defer v1.deinit();
+    try v1.write(.proc_state, "ckpt", "v1");
+
+    // New incarnation (different PID) with the same key reattaches and reads it.
+    var v2 = try StorageView.initWithStateKey(std.testing.io, allocator, base_owned, pid_b, defaultPolicy(), "svc");
+    defer v2.deinit();
+    const got = try v2.read(.proc_state, "ckpt");
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("v1", got);
+
+    // Control: PID-keyed (no stable key) — the new PID sees nothing.
+    var v3 = try StorageView.init(std.testing.io, allocator, base_owned, pid_b, defaultPolicy());
+    defer v3.deinit();
+    try std.testing.expectError(StorageError.NotFound, v3.read(.proc_state, "ckpt"));
+}
+
+// warden-dpl
+// A state_key with a path separator or traversal is rejected.
+test "initWithStateKey rejects unsafe state_key" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try testutil.tmpAbs(&path_buf, &tmp);
+    const base_owned = try allocator.dupe(u8, base);
+    defer allocator.free(base_owned);
+    const pid = Pid{ .beam = 1, .proc = 1 };
+    try std.testing.expectError(StorageError.InvalidPath, StorageView.initWithStateKey(std.testing.io, allocator, base_owned, pid, defaultPolicy(), "a/b"));
+    try std.testing.expectError(StorageError.InvalidPath, StorageView.initWithStateKey(std.testing.io, allocator, base_owned, pid, defaultPolicy(), ".."));
+    try std.testing.expectError(StorageError.InvalidPath, StorageView.initWithStateKey(std.testing.io, allocator, base_owned, pid, defaultPolicy(), ""));
+}

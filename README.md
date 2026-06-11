@@ -142,11 +142,13 @@ describes the runtime as implemented today, and is explicit about what is
 - Storage namespaces are keyed by PID: `<base>/<ns>/<beam>/<proc>/…`. Because a
   restart yields a **new PID**, the new incarnation gets a fresh, empty namespace
   view — including `proc-state`.
-- **`proc-state` is therefore NOT automatically reattached across a restart.**
-  Its bytes persist on disk under the old PID's path, but the new incarnation
-  cannot see them through its own namespace. Durable state that must survive a
-  restart has to be re-keyed and reloaded by the application (e.g. under a stable
-  logical key in `shared-vol`), not assumed.
+- By default `proc-state` is **not** reattached across a restart: it is
+  PID-keyed, so a new incarnation starts with an empty view.
+- **Opt-in reattach:** pass a stable `state_key` to `proc.spawn` and `proc-state`
+  is keyed under `state/<beam>/<state_key>/` instead of the PID. A restarted
+  incarnation (new PID, same `state_key`) then reattaches to its prior durable
+  state. Without a `state_key`, durable state must be re-keyed and reloaded by
+  the application. `proc-temp`/`proc-cache` remain PID-keyed regardless.
 - `proc-temp` is scratch space — treat it as non-durable. `proc-cache` is
   evictable and must never be relied on for correctness.
 
@@ -251,6 +253,12 @@ reclaimed, so subsequent `send`/`call` to it fail (`error.NoSuchProcess` /
 imply a live child** — check the child's state, not just the tree root. The
 reaper's poll cadence (default 50ms) is adjustable on the fly per beam via the
 `beam.reaper` RPC or `wardenctl renice <beam> <ms>`.
+
+A worker may also pass an optional `state_key` on `proc.spawn`. When set, its
+`proc-state` namespace is keyed by that stable name instead of its PID, so a
+respawned incarnation reattaches to the state it wrote before the crash (see
+[Semantics → Storage across restart](#semantics)). Without it, restart is a
+clean slate.
 
 ### Failure matrix
 
@@ -518,7 +526,7 @@ Standard OTP strategies, adopted by name:
 |---|---|
 | `proc-temp` | Scratch. `cleanupTemp()` exists but is **not auto-invoked on exit** today — treat as non-durable, not auto-deleted. |
 | `proc-cache` | Recomputable. `evictCache()` exists but is **not auto-invoked** — never rely on its contents. |
-| `proc-state` | Persists on disk, but keyed by PID — **not auto-reattached after restart** (new PID = new namespace). See [Semantics](#semantics). |
+| `proc-state` | Persists on disk; PID-keyed by default (**not** reattached after restart). Pass a stable `state_key` at spawn to reattach across restart — see [Semantics](#semantics). |
 | `shared-vol` | Named shared datasets; access gated by explicit per-view grants (`grantVolume`). |
 
 ---

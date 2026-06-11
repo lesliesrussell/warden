@@ -63,6 +63,11 @@ pub const StorageView = struct {
     allocator: std.mem.Allocator,
     base_dir: []const u8,
     pid: Pid,
+    // warden-dpl: optional stable key for the proc_state namespace. When set,
+    // proc_state resolves under state/<beam>/<state_key>/ instead of the
+    // PID-keyed state/<beam>/<proc>/, so a restarted incarnation (new PID) with
+    // the same key reattaches to its prior durable state. Borrowed (not owned).
+    state_key: ?[]const u8,
     policy: PolicyEnvelope,
     granted_volumes: std.StringHashMap(void),
 
@@ -79,11 +84,31 @@ pub const StorageView = struct {
         pid: Pid,
         policy: PolicyEnvelope,
     ) !StorageView {
+        return initWithStateKey(io, allocator, base_dir, pid, policy, null);
+    }
+
+    // warden-dpl
+    /// Like init, but with an opt-in stable proc_state key (see the field doc).
+    /// `state_key` must be a single safe path segment (no '/', '.', or '..').
+    pub fn initWithStateKey(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        base_dir: []const u8,
+        pid: Pid,
+        policy: PolicyEnvelope,
+        state_key: ?[]const u8,
+    ) !StorageView {
+        if (state_key) |sk| {
+            if (sk.len == 0) return StorageError.InvalidPath;
+            if (std.mem.indexOfScalar(u8, sk, '/') != null) return StorageError.InvalidPath;
+            if (std.mem.eql(u8, sk, ".") or std.mem.eql(u8, sk, "..")) return StorageError.InvalidPath;
+        }
         return StorageView{
             .io = io,
             .allocator = allocator,
             .base_dir = base_dir,
             .pid = pid,
+            .state_key = state_key,
             .policy = policy,
             .granted_volumes = std.StringHashMap(void).init(allocator),
             .bytes_temp = 0,
@@ -137,6 +162,15 @@ pub const StorageView = struct {
                 );
             },
             .proc_state => {
+                // warden-dpl: a stable state_key (if set) keys proc_state
+                // instead of the ephemeral PID, so it survives restart.
+                if (self.state_key) |sk| {
+                    return std.fmt.allocPrint(
+                        self.allocator,
+                        "{s}/state/{d}/{s}/{s}",
+                        .{ self.base_dir, self.pid.beam, sk, rel_path },
+                    );
+                }
                 return std.fmt.allocPrint(
                     self.allocator,
                     "{s}/state/{d}/{d}/{s}",
