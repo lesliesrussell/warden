@@ -3,3 +3,17 @@
 .dolt/
 *.db
 .beads-credential-key
+__pycache__/
+*.pyc
+
+# bv (beads viewer) local config and caches
+.bv/
+.beads/
+.nardo/
+.omc/
+.zig-cache/
+zig-out/
+
+AGENTS.md
+CLAUDE.md
+warden-runtime-spec.md
