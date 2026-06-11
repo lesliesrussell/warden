@@ -148,7 +148,10 @@ describes the runtime as implemented today, and is explicit about what is
   is keyed under `state/<beam>/<state_key>/` instead of the PID. A restarted
   incarnation (new PID, same `state_key`) then reattaches to its prior durable
   state. Without a `state_key`, durable state must be re-keyed and reloaded by
-  the application. `proc-temp`/`proc-cache` remain PID-keyed regardless.
+  the application. `proc-temp`/`proc-cache` remain PID-keyed regardless. (Native
+  processes build their own context, so they get the same behavior by calling
+  `Ctx.initWithStateKey` with a stable key — e.g. their `ChildSpec` id — rather
+  than through `proc.spawn`.)
 - `proc-temp` is scratch space — treat it as non-durable. `proc-cache` is
   evictable and must never be relied on for correctness.
 

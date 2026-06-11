@@ -367,3 +367,39 @@ test "Runtime.tryDeliverMailbox: true when present, false after free" {
     try std.testing.expect(!try rt.tryDeliverMailbox(p, msg));
     rt.freeMailbox(p); // idempotent — no double free
 }
+
+// warden-18z
+// Native processes construct their own Ctx, so they reattach durable state
+// across a restart by passing a stable state_key to Ctx.initWithStateKey (e.g.
+// the child's role / ChildSpec id) — no SpawnOpts/ChildSpec plumbing needed,
+// since the trampoline/supervisor never build the Ctx.
+test "native Ctx reattaches proc-state across PID via state_key" {
+    const allocator = std.testing.allocator;
+    var tmp_log = std.testing.tmpDir(.{});
+    defer tmp_log.cleanup();
+    var tmp_st = std.testing.tmpDir(.{});
+    defer tmp_st.cleanup();
+    var log_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const log_dir = try testutil.tmpAbs(&log_buf, &tmp_log);
+    var st_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const st_dir = try testutil.tmpAbs(&st_buf, &tmp_st);
+
+    const rt = try beam.Runtime.init(allocator, 5);
+    defer rt.destroy();
+
+    // First incarnation writes durable state under a stable key.
+    const pid_a = try rt.registry.spawn(.native_worker, null, .{});
+    {
+        var ctx = try beam.Ctx.initWithStateKey(rt, pid_a, log_dir, st_dir, "memory_svc");
+        defer ctx.deinit();
+        try ctx.fsWrite(.proc_state, "ckpt", "v1");
+    }
+
+    // Restart: a new incarnation (new PID) with the same key reattaches.
+    const pid_b = try rt.registry.spawn(.native_worker, null, .{});
+    var ctx2 = try beam.Ctx.initWithStateKey(rt, pid_b, log_dir, st_dir, "memory_svc");
+    defer ctx2.deinit();
+    const got = try ctx2.fsRead(.proc_state, "ckpt");
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("v1", got);
+}
