@@ -12,12 +12,8 @@ const PolicyEnvelope = types.PolicyEnvelope;
 const Registry = registry_mod.Registry;
 
 // warden-u8y
-pub const StorageNs = enum { temp, cache, state };
-
-// warden-u8y
 pub const PolicyError = error{
     ProcessNotFound,
-    QuotaExceeded,
     UnauthorizedPromotion,
     NotPaused,
 };
@@ -193,44 +189,6 @@ pub const PolicyEngine = struct {
             self.allocator.free(rec.reason);
             _ = self.promotions.remove(proc_id);
         }
-    }
-
-    // warden-u8y
-    /// Check if a proposed mailbox enqueue would violate policy.
-    pub fn checkMailboxQuota(self: *PolicyEngine, pid: Pid, current_len: u32, current_bytes: u64, msg_bytes: u64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const entry = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
-        const policy = entry.policy;
-
-        if (current_len + 1 > policy.max_mailbox_len) return PolicyError.QuotaExceeded;
-        if (current_bytes + msg_bytes > policy.max_mailbox_bytes) return PolicyError.QuotaExceeded;
-    }
-
-    // warden-u8y
-    /// Check log volume quota (simplified ceiling check).
-    pub fn checkLogQuota(self: *PolicyEngine, pid: Pid, bytes: u64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const entry = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
-        if (bytes > entry.policy.max_log_bytes_per_min) return PolicyError.QuotaExceeded;
-    }
-
-    // warden-u8y
-    /// Check storage quota for a namespace.
-    pub fn checkStorageQuota(self: *PolicyEngine, pid: Pid, ns: StorageNs, bytes: u64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const entry = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
-        const limit = switch (ns) {
-            .temp => entry.policy.max_temp_bytes,
-            .cache => entry.policy.max_cache_bytes,
-            .state => entry.policy.max_state_bytes,
-        };
-        if (bytes > limit) return PolicyError.QuotaExceeded;
     }
 
     // warden-u8y

@@ -11,7 +11,6 @@ const PolicyEnvelope = types.PolicyEnvelope;
 const Registry = registry_mod.Registry;
 const PolicyEngine = policy_mod.PolicyEngine;
 const PolicyError = policy_mod.PolicyError;
-const StorageNs = policy_mod.StorageNs;
 
 fn defaultPolicy() PolicyEnvelope {
     return .{};
@@ -164,74 +163,10 @@ test "unquarantine on non-quarantined process returns NotPaused" {
     try std.testing.expectError(PolicyError.NotPaused, engine.unquarantine(pid));
 }
 
-// warden-u8y
-test "checkMailboxQuota returns QuotaExceeded when over limit" {
-    var reg = Registry.init(std.testing.allocator, 1);
-    defer reg.deinit();
-    var engine = PolicyEngine.init(std.testing.allocator, &reg);
-    defer engine.deinit();
-
-    const pid = try spawnReady(&reg);
-    // Default max_mailbox_len is 1000 — fill it up
-    try std.testing.expectError(
-        PolicyError.QuotaExceeded,
-        engine.checkMailboxQuota(pid, 1000, 0, 1),
-    );
-
-    // Default max_mailbox_bytes is 4MiB — exceed it
-    const four_mib: u64 = 4 * 1024 * 1024;
-    try std.testing.expectError(
-        PolicyError.QuotaExceeded,
-        engine.checkMailboxQuota(pid, 0, four_mib, 1),
-    );
-
-    // Under both limits — should succeed
-    try engine.checkMailboxQuota(pid, 0, 0, 1);
-}
-
-// warden-u8y
-test "checkLogQuota returns QuotaExceeded when over limit" {
-    var reg = Registry.init(std.testing.allocator, 1);
-    defer reg.deinit();
-    var engine = PolicyEngine.init(std.testing.allocator, &reg);
-    defer engine.deinit();
-
-    const pid = try spawnReady(&reg);
-    const one_mib: u64 = 1 * 1024 * 1024;
-    // Exactly at limit — OK
-    try engine.checkLogQuota(pid, one_mib);
-    // Over limit
-    try std.testing.expectError(
-        PolicyError.QuotaExceeded,
-        engine.checkLogQuota(pid, one_mib + 1),
-    );
-}
-
-// warden-u8y
-test "checkStorageQuota returns QuotaExceeded when over limit" {
-    var reg = Registry.init(std.testing.allocator, 1);
-    defer reg.deinit();
-    var engine = PolicyEngine.init(std.testing.allocator, &reg);
-    defer engine.deinit();
-
-    const pid = try spawnReady(&reg);
-
-    // state limit is 64MiB
-    const sixty_four_mib: u64 = 64 * 1024 * 1024;
-    try engine.checkStorageQuota(pid, .state, sixty_four_mib);
-    try std.testing.expectError(
-        PolicyError.QuotaExceeded,
-        engine.checkStorageQuota(pid, .state, sixty_four_mib + 1),
-    );
-
-    // temp limit is 256MiB
-    const two56_mib: u64 = 256 * 1024 * 1024;
-    try engine.checkStorageQuota(pid, .temp, two56_mib);
-    try std.testing.expectError(
-        PolicyError.QuotaExceeded,
-        engine.checkStorageQuota(pid, .temp, two56_mib + 1),
-    );
-}
+// warden-jq6: the PolicyEngine.check{Mailbox,Log,Storage}Quota helpers and their
+// tests were removed — they were never called by the runtime (mailbox limits are
+// enforced in mailbox.zig's overflow path, storage limits in storage.zig), so
+// they implied a second enforcement path that did not exist.
 
 // warden-u8y
 test "promote on unknown pid returns ProcessNotFound" {
