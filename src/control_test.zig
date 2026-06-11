@@ -934,3 +934,248 @@ test "control server: proc.call does not leak the ephemeral caller pid" {
     // caller_pid was created then reclaimed by the cleanup defer — net zero.
     try std.testing.expectEqual(before, after);
 }
+
+// warden-6a1
+// Characterization tests: lock the control-plane JSON wire contract (error
+// branches + req_id echo) so the warden-o86 refactor cannot silently drift
+// response shapes. These describe CURRENT behavior; they must stay green
+// through every behavior-preserving step of the refactor.
+
+fn ctlRpc(allocator: std.mem.Allocator, socket_path: []const u8, req: []const u8) ![]u8 {
+    const stream = try testutil.connectUnix(socket_path);
+    defer stream.close(std.testing.io);
+    try control.writeFrame(std.testing.io, stream, req);
+    return try control.readFrame(std.testing.io, allocator, stream);
+}
+
+fn isJsonNull(v: std.json.Value) bool {
+    return switch (v) {
+        .null => true,
+        else => false,
+    };
+}
+
+/// Assert a request yields ok=false, the exact error string, and a null payload.
+fn expectCtlError(
+    allocator: std.mem.Allocator,
+    socket_path: []const u8,
+    req: []const u8,
+    want_error: []const u8,
+) !void {
+    const resp = try ctlRpc(allocator, socket_path, req);
+    defer allocator.free(resp);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expect(!obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings(want_error, obj.get("error").?.string);
+    try std.testing.expect(isJsonNull(obj.get("payload").?));
+}
+
+test "control server (warden-6a1): req_id echoed verbatim on success and error" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_reqid.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    {
+        const resp = try ctlRpc(allocator, socket_path, "{\"req_id\":\"echo-success-1\",\"action\":\"beam.list\",\"payload\":{}}");
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try std.testing.expect(obj.get("ok").?.bool);
+        try std.testing.expectEqualStrings("echo-success-1", obj.get("req_id").?.string);
+    }
+    {
+        const resp = try ctlRpc(allocator, socket_path, "{\"req_id\":\"echo-error-2\",\"action\":\"no.such.action\",\"payload\":{}}");
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try std.testing.expect(!obj.get("ok").?.bool);
+        try std.testing.expectEqualStrings("echo-error-2", obj.get("req_id").?.string);
+    }
+}
+
+test "control server (warden-6a1): unknown action error envelope shape" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_unknown.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"u1\",\"action\":\"no.such.action\",\"payload\":{}}",
+        "unknown action: no.such.action");
+}
+
+test "control server (warden-6a1): proc.spawn payload validation errors" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_spawn.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"s1\",\"action\":\"proc.spawn\"}", "missing payload");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"s2\",\"action\":\"proc.spawn\",\"payload\":5}", "payload must be object");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"s3\",\"action\":\"proc.spawn\",\"payload\":{}}", "missing cmd");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"s4\",\"action\":\"proc.spawn\",\"payload\":{\"cmd\":\"x\"}}", "cmd must be array");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"s5\",\"action\":\"proc.spawn\",\"payload\":{\"cmd\":[1]}}", "cmd entries must be strings");
+    // valid primary beam (42) + bad restart policy -> rejected before spawn.
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"s6\",\"action\":\"proc.spawn\",\"payload\":{\"cmd\":[\"x\"],\"restart\":\"bogus\"}}", "invalid restart");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"s7\",\"action\":\"proc.spawn\",\"payload\":{\"cmd\":[\"x\"],\"beam\":999}}", "unknown beam");
+}
+
+test "control server (warden-6a1): beam.reaper validation and success" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_reaper.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"r1\",\"action\":\"beam.reaper\"}", "missing payload");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"r2\",\"action\":\"beam.reaper\",\"payload\":{}}", "missing interval_ms");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"r3\",\"action\":\"beam.reaper\",\"payload\":{\"interval_ms\":-1}}",
+        "interval_ms must be a non-negative integer");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"r4\",\"action\":\"beam.reaper\",\"payload\":{\"beam\":999,\"interval_ms\":100}}", "unknown beam");
+    {
+        const resp = try ctlRpc(allocator, socket_path,
+            "{\"req_id\":\"r5\",\"action\":\"beam.reaper\",\"payload\":{\"interval_ms\":100}}");
+        defer allocator.free(resp);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, resp, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        try std.testing.expect(obj.get("ok").?.bool);
+        try std.testing.expect(obj.get("payload").?.object.get("interval_ms").? == .integer);
+    }
+}
+
+test "control server (warden-6a1): proc.send payload validation errors" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_send.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"d1\",\"action\":\"proc.send\"}", "missing payload");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"d2\",\"action\":\"proc.send\",\"payload\":{}}", "missing pid");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"d3\",\"action\":\"proc.send\",\"payload\":{\"pid\":5}}", "pid must be string");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"d4\",\"action\":\"proc.send\",\"payload\":{\"pid\":\"notapid\"}}", "invalid pid");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"d5\",\"action\":\"proc.send\",\"payload\":{\"pid\":\"42/1\"}}", "missing type");
+}
+
+test "control server (warden-6a1): proc.call payload validation errors" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_call.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"c1\",\"action\":\"proc.call\"}", "missing payload");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"c2\",\"action\":\"proc.call\",\"payload\":{}}", "missing pid");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"c3\",\"action\":\"proc.call\",\"payload\":{\"pid\":5}}", "pid must be string");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"c4\",\"action\":\"proc.call\",\"payload\":{\"pid\":\"notapid\"}}", "invalid pid");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"c5\",\"action\":\"proc.call\",\"payload\":{\"pid\":\"42/1\"}}", "missing type");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"c6\",\"action\":\"proc.call\",\"payload\":{\"pid\":\"999/1\",\"type\":\"req.run\"}}", "unknown beam");
+}
+
+test "control server (warden-6a1): proc.control validation and not-found" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_control.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"k1\",\"action\":\"proc.control\"}", "missing payload");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"k2\",\"action\":\"proc.control\",\"payload\":{}}", "missing pid");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"k3\",\"action\":\"proc.control\",\"payload\":{\"pid\":\"42/1\"}}", "missing op");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"k4\",\"action\":\"proc.control\",\"payload\":{\"pid\":\"nopid\",\"op\":\"pause\"}}",
+        "invalid pid format, expected beam/proc");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"k5\",\"action\":\"proc.control\",\"payload\":{\"pid\":\"999/1\",\"op\":\"pause\"}}", "unknown beam");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"k6\",\"action\":\"proc.control\",\"payload\":{\"pid\":\"42/999999\",\"op\":\"pause\"}}", "process not found");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"k7\",\"action\":\"proc.control\",\"payload\":{\"pid\":\"42/1\",\"op\":\"frobnicate\"}}", "unknown op: frobnicate");
+}
+
+test "control server (warden-6a1): logs.stream requires log_dir" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_logs_nodir.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"g1\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"42/1\"}}", "log_dir not configured");
+}
+
+test "control server (warden-6a1): logs.stream pid and file errors" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_c0_logs.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.setLogDir("/tmp");
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"g2\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"nopid\"}}",
+        "invalid pid format, expected beam/proc");
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"g3\",\"action\":\"logs.stream\",\"payload\":{\"pid\":\"42/999999\"}}", "log file not found");
+}
