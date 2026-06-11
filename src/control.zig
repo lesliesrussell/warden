@@ -430,9 +430,7 @@ fn handleBeamList(h: *const HandlerCtx) !void {
     for (ids.items, 0..) |bid, idx| {
         if (idx > 0) try w.writeByte(',');
         const brt = cs.runtimes.get(bid).?;
-        brt.registry.mutex.lock();
-        const proc_count = brt.registry.map.count();
-        brt.registry.mutex.unlock();
+        const proc_count = brt.registry.count(); // warden-f19
         try w.print(
             "{{\"beam_id\":{d},\"version\":\"0.1.0\",\"uptime_ms\":{d},\"process_count\":{d}}}",
             .{ bid, uptime_ms, proc_count });
@@ -797,11 +795,8 @@ fn handleProcControl(h: *const HandlerCtx) !void {
             });
         }
     } else if (std.mem.eql(u8, op_str, "quarantine")) {
-        reg.mutex.lock();
-        const entry = reg.map.getPtr(pid.proc);
-        if (entry) |e| e.policy.activity_class = .tiny;
-        reg.mutex.unlock();
-        if (entry == null) return r.err("process not found");
+        // warden-f19: mutate under the registry's own lock via its API.
+        reg.setActivityClass(pid, .tiny) catch return r.err("process not found");
         const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"quarantine\"}}", .{pid_str});
         defer allocator.free(out);
         try r.ok(out);
@@ -819,14 +814,8 @@ fn handleProcControl(h: *const HandlerCtx) !void {
             defer allocator.free(m);
             return r.err(m);
         };
-        reg.mutex.lock();
-        const entry = reg.map.getPtr(pid.proc);
-        if (entry) |e| {
-            e.policy.activity_class = new_class;
-            e.policy.promotion_ttl_ms = ttl_ms;
-        }
-        reg.mutex.unlock();
-        if (entry == null) return r.err("process not found");
+        // warden-f19: mutate under the registry's own lock via its API.
+        reg.setPromotion(pid, new_class, ttl_ms) catch return r.err("process not found");
         const out = try std.fmt.allocPrint(allocator, "{{\"pid\":\"{s}\",\"op\":\"promote\",\"class\":\"{s}\"}}", .{ pid_str, class_str });
         defer allocator.free(out);
         try r.ok(out);

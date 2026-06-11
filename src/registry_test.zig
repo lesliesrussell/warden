@@ -137,3 +137,44 @@ test "concurrent spawn produces no duplicate PIDs" {
         try std.testing.expect(procs[i] != procs[i - 1]);
     }
 }
+
+// warden-f19
+test "setActivityClass sets class under lock and leaves ttl untouched" {
+    var reg = Registry.init(std.testing.allocator, 1);
+    defer reg.deinit();
+
+    const pid = try reg.spawn(.native_worker, null, .{ .promotion_ttl_ms = 1234 });
+    try reg.setActivityClass(pid, .tiny);
+
+    const entry = reg.lookup(pid) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(types.ActivityClass.tiny, entry.policy.activity_class);
+    try std.testing.expectEqual(@as(?u64, 1234), entry.policy.promotion_ttl_ms);
+}
+
+// warden-f19
+test "setPromotion sets class and ttl together under lock" {
+    var reg = Registry.init(std.testing.allocator, 1);
+    defer reg.deinit();
+
+    const pid = try reg.spawn(.native_worker, null, defaultPolicy());
+    try reg.setPromotion(pid, .elevated, 5000);
+
+    const entry = reg.lookup(pid) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqual(types.ActivityClass.elevated, entry.policy.activity_class);
+    try std.testing.expectEqual(@as(?u64, 5000), entry.policy.promotion_ttl_ms);
+}
+
+// warden-f19
+test "mutate-under-lock methods report ProcessNotFound; count tracks size" {
+    var reg = Registry.init(std.testing.allocator, 1);
+    defer reg.deinit();
+
+    const ghost = Pid{ .beam = 1, .proc = 999999 };
+    try std.testing.expectError(RegistryError.ProcessNotFound, reg.setActivityClass(ghost, .tiny));
+    try std.testing.expectError(RegistryError.ProcessNotFound, reg.setPromotion(ghost, .elevated, null));
+
+    try std.testing.expectEqual(@as(usize, 0), reg.count());
+    _ = try reg.spawn(.native_worker, null, defaultPolicy());
+    _ = try reg.spawn(.native_worker, null, defaultPolicy());
+    try std.testing.expectEqual(@as(usize, 2), reg.count());
+}
