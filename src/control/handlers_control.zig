@@ -17,6 +17,9 @@ pub fn handleProcControl(h: *const HandlerCtx) !void {
     const r = h.r;
 
     const payload = payload_val orelse return r.err("missing payload");
+    // warden-h6u: guard before payload.object accesses below, matching
+    // proc.spawn/proc.send — a non-object payload must not panic the server thread.
+    if (payload != .object) return r.err("payload must be object");
 
     const pid_str = switch (payload.object.get("pid") orelse .null) {
         .string => |s| s,

@@ -1232,3 +1232,21 @@ test "control server (warden-veb): error message with special chars is escaped" 
     try std.testing.expect(!obj.get("ok").?.bool);
     try std.testing.expectEqualStrings("unknown action: bad\"action", obj.get("error").?.string);
 }
+
+// warden-h6u
+// proc.control must reject a non-object payload instead of panicking on
+// payload.object (matching proc.spawn/proc.send). Without the guard the server
+// thread hits an illegal union-field access and aborts the process.
+test "control server (warden-h6u): proc.control with non-object payload" {
+    const allocator = std.testing.allocator;
+    const rt = try beam.Runtime.init(allocator, 42);
+    defer rt.destroy();
+    const socket_path = "/tmp/warden_ctrl_h6u.sock";
+    var cs = try control.ControlServer.init(allocator, rt, socket_path);
+    try cs.start();
+    defer cs.stop();
+    clock.sleepNs(5 * std.time.ns_per_ms);
+
+    try expectCtlError(allocator, socket_path,
+        "{\"req_id\":\"h1\",\"action\":\"proc.control\",\"payload\":5}", "payload must be object");
+}
