@@ -232,14 +232,19 @@ pub const PolicyEngine = struct {
     }
 
     // warden-u8y
-    /// Pause a process (set activity_class to .paused).
+    // warden-092: quarantine demotes a process to the .tiny activity class (the
+    // same class the control/wardenctl path uses) — an advisory label, not a
+    // hard stop. The mutation goes through Registry.setActivityClass (lock-held)
+    // rather than a lookup-then-mutate pointer, avoiding the use-after-unlock
+    // pattern fixed in warden-f19.
+    /// Quarantine a process: demote to .tiny and record prior class for restore.
     pub fn quarantine(self: *PolicyEngine, pid: Pid, reason: []const u8) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         const entry = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
 
-        // Store prior class via the promotions map — quarantine never expires (maxInt)
+        // Read prior class (copy) before mutating; never expires (maxInt).
         const prior_class = if (self.promotions.get(pid.proc)) |existing| existing.prior_class else entry.policy.activity_class;
 
         // Free old promotion reason if overwriting
@@ -252,13 +257,13 @@ pub const PolicyEngine = struct {
 
         const rec = PromotionRecord{
             .prior_class = prior_class,
-            .promoted_class = .paused,
+            .promoted_class = .tiny,
             .expires_at_ms = std.math.maxInt(i64),
             .reason = reason_copy,
         };
         try self.promotions.put(pid.proc, rec);
 
-        entry.policy.activity_class = .paused;
+        try self.registry.setActivityClass(pid, .tiny);
 
         try self.emitEvent(pid, "quarantine", reason);
     }
@@ -271,11 +276,13 @@ pub const PolicyEngine = struct {
 
         const entry = self.registry.lookup(pid) orelse return PolicyError.ProcessNotFound;
 
-        if (entry.policy.activity_class != .paused) return PolicyError.NotPaused;
+        // warden-092: quarantine demotes to .tiny; only a quarantined process can
+        // be unquarantined. (Error name kept as NotPaused for compatibility.)
+        if (entry.policy.activity_class != .tiny) return PolicyError.NotPaused;
 
         const rec = self.promotions.get(pid.proc) orelse {
-            // Paused but no promotion record — restore to .normal
-            entry.policy.activity_class = .normal;
+            // Quarantined but no promotion record — restore to .normal
+            try self.registry.setActivityClass(pid, .normal);
             try self.emitEvent(pid, "unquarantine", "");
             return;
         };
@@ -284,7 +291,7 @@ pub const PolicyEngine = struct {
         self.allocator.free(rec.reason);
         _ = self.promotions.remove(pid.proc);
 
-        entry.policy.activity_class = prior;
+        try self.registry.setActivityClass(pid, prior);
 
         try self.emitEvent(pid, "unquarantine", "");
     }

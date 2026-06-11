@@ -118,7 +118,7 @@ test "policy_change events recorded for promote, demote, expire" {
 }
 
 // warden-u8y
-test "quarantine sets activity_class to .paused" {
+test "quarantine sets activity_class to .tiny" {
     var reg = Registry.init(std.testing.allocator, 1);
     defer reg.deinit();
     var engine = PolicyEngine.init(std.testing.allocator, &reg);
@@ -128,7 +128,7 @@ test "quarantine sets activity_class to .paused" {
     try engine.quarantine(pid, "misbehaving");
 
     const entry = reg.lookup(pid) orelse return error.TestUnexpectedNull;
-    try std.testing.expectEqual(ActivityClass.paused, entry.policy.activity_class);
+    try std.testing.expectEqual(ActivityClass.tiny, entry.policy.activity_class);
 
     // Verify quarantine event recorded
     try std.testing.expectEqual(@as(usize, 1), engine.events.items.len);
@@ -154,7 +154,7 @@ test "unquarantine restores prior class" {
 }
 
 // warden-u8y
-test "unquarantine on non-paused process returns NotPaused" {
+test "unquarantine on non-quarantined process returns NotPaused" {
     var reg = Registry.init(std.testing.allocator, 1);
     defer reg.deinit();
     var engine = PolicyEngine.init(std.testing.allocator, &reg);
