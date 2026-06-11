@@ -85,3 +85,22 @@ test "BridgeSupervisor.init succeeds" {
     var sup = BridgeSupervisor.init(allocator, rt);
     sup.deinit();
 }
+
+// warden-6f6
+test "handshake frame advertises protocol version and capabilities" {
+    const allocator = std.testing.allocator;
+    const pid = @import("types.zig").Pid{ .beam = 3, .proc = 9 };
+    const frame = try bridge.buildHandshakeFrame(allocator, pid, "/tmp/warden-9.sock");
+    defer allocator.free(frame);
+
+    // Parses as JSON and carries the expected fields.
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, frame, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("handshake", obj.get("kind").?.string);
+    try std.testing.expectEqual(@as(i64, bridge.protocol_version), obj.get("protocol_version").?.integer);
+    try std.testing.expectEqualStrings("3/9", obj.get("pid").?.string);
+    const caps = obj.get("capabilities").?.array;
+    try std.testing.expectEqual(@as(usize, 5), caps.items.len);
+    try std.testing.expectEqualStrings("send", caps.items[0].string);
+}
