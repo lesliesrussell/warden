@@ -279,7 +279,7 @@ clean slate.
 | Worker exits / socket drops | Reader detects EOF, marks the worker crashed; reaper respawns it as a **new PID** per restart policy (or retires it past the runaway guard) | In-flight `call` times out; messages in the old mailbox are lost; no redelivery |
 | Worker hangs (no progress, socket open) | **Not detected by the bridge** — a watchdog reading `last_active_at` must notice and intervene (`pause`/`kill`) | `call` times out; nothing happens automatically without a watchdog |
 | Protocol violation (malformed JSON, unknown frame kind, missing fields, stray reply id) | Frame is logged/dropped; the connection **stays open**; the worker is **not** killed or quarantined | No effect; a bad/unmatched reply is simply never delivered to a caller |
-| Version skew (runtime vs SDK) | The handshake advertises `protocol_version` + supported `capabilities`; the worker SDK validates it on connect | The SDK raises `WardenProtocolError` and refuses to proceed on a version mismatch (fail-fast). Worker→runtime version reporting is not yet bidirectional |
+| Version skew (runtime vs SDK) | **Bidirectional**: the handshake advertises the runtime's `protocol_version` + `capabilities`, and the worker reports its version back in a `hello` frame | The SDK raises `WardenProtocolError` on mismatch (fail-fast); the runtime logs a warning on the worker's process log if the worker's reported version differs |
 
 ---
 

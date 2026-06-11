@@ -6,6 +6,7 @@ import unittest
 from warden.client import (
     SUPPORTED_PROTOCOL,
     WardenProtocolError,
+    _hello_frame,
     _validate_handshake,
 )
 
@@ -26,6 +27,13 @@ class HandshakeValidationTests(unittest.TestCase):
         with self.assertRaises(WardenProtocolError):
             _validate_handshake({"pid": "1/2"})
 
+
+    # warden-19i
+    def test_hello_frame_reports_supported_version(self):
+        self.assertEqual(
+            _hello_frame(),
+            {"kind": "hello", "protocol_version": SUPPORTED_PROTOCOL},
+        )
 
 if __name__ == "__main__":
     unittest.main()
