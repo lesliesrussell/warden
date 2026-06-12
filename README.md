@@ -200,7 +200,10 @@ describes the runtime as implemented today, and is explicit about what is
 
 - The control socket has **no authentication or authorization**: any process
   that can open `~/.warden/ctrl.sock` has full control authority. The model is
-  **local, single-tenant by design** — secure it with filesystem permissions.
+  **local, single-tenant by design**. The runtime creates the socket mode `0600`
+  (owner-only) — on Linux that restricts who can connect; on macOS connect isn't
+  gated by socket-file perms, so the parent directory's permissions are the
+  protection. Multi-tenant authentication / per-operation ACLs are out of scope.
 - Control operations are best-effort and applied per current process state
   (pausing an already-paused process is a no-op). Concurrent operations on the
   same process are serialized by the registry lock with **no conflict
@@ -459,8 +462,8 @@ Commands:
 The runtime exposes a Unix socket at `~/.warden/ctrl.sock` by default (override
 with `$WARDEN_CTRL_SOCKET` or `--socket`). **There is no authentication** — any
 peer that can open the socket has full control authority. The model is local and
-single-tenant; secure it with filesystem permissions. See
-[Semantics → Control plane](#semantics).
+single-tenant; the socket is created `0600` (owner-only) and should live in a
+private directory. See [Semantics → Control plane](#semantics).
 
 ---
 

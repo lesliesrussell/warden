@@ -142,6 +142,16 @@ pub const ControlServer = struct {
         const addr = try std.Io.net.UnixAddress.init(socket_path);
         const server = try addr.listen(runtime.io, .{});
 
+        // warden-28a: restrict the control socket to its owner (0600), so the
+        // single-tenant/local model is enforced by file permissions rather than
+        // left at the umask default. Best-effort; enforced for connect on Linux
+        // (macOS leans on the parent directory's permissions instead).
+        {
+            const path_z = try allocator.dupeZ(u8, socket_path);
+            defer allocator.free(path_z);
+            _ = std.c.chmod(path_z, @as(std.c.mode_t, 0o600));
+        }
+
         // warden-7oi: seed the beam and supervisor maps with the primary runtime
         var runtimes = std.AutoHashMap(u32, *Runtime).init(allocator);
         errdefer runtimes.deinit();
