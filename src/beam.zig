@@ -267,6 +267,9 @@ pub const Ctx = struct {
         try pl.initInPlace(runtime.io, runtime.allocator, runtime.beam_id, pid.proc, dir);
         errdefer pl.deinit();
 
+        // warden-b4h: enforce the process's per-minute log byte-rate quota.
+        if (runtime.registry.lookup(pid)) |e| pl.max_bytes_per_min = e.policy.max_log_bytes_per_min;
+
         const sv = try StorageView.initWithStateKey(
             runtime.io,
             runtime.allocator,

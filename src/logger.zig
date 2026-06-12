@@ -239,6 +239,13 @@ pub const ProcessLogger = struct {
     seq: u64,
     // warden-ga2: rotate the active log once it reaches this many bytes.
     rotate_at: u64,
+    // warden-b4h: per-minute byte-rate quota. 0 = unlimited. Over-budget records
+    // in the current window are dropped (one `log_quota_exceeded` marker is
+    // written per window so the drop is observable). Set from the process policy.
+    max_bytes_per_min: u64,
+    window_start_ms: i64,
+    bytes_this_window: u64,
+    quota_marker_written: bool,
 
     // warden-554
     /// Initialise in-place.  Caller must ensure the returned value is never
@@ -276,6 +283,10 @@ pub const ProcessLogger = struct {
         self.buf = undefined;
         self.seq = 0;
         self.rotate_at = default_rotate_bytes;
+        self.max_bytes_per_min = 0;
+        self.window_start_ms = clock.nowMs();
+        self.bytes_this_window = 0;
+        self.quota_marker_written = false;
         // file_writer stores &self.buf — must be set after self is stable.
         self.file_writer = std.Io.File.Writer.init(file, io, &self.buf);
         self.file_writer.pos = st.size;
@@ -313,6 +324,10 @@ pub const ProcessLogger = struct {
             .file_writer = undefined,
             .seq = 0,
             .rotate_at = default_rotate_bytes,
+            .max_bytes_per_min = 0,
+            .window_start_ms = clock.nowMs(),
+            .bytes_this_window = 0,
+            .quota_marker_written = false,
         };
         self.file_writer = std.Io.File.Writer.init(file, io, &self.buf);
         self.file_writer.pos = st.size;
@@ -336,6 +351,29 @@ pub const ProcessLogger = struct {
     /// `extra` is an optional `std.json.ObjectMap` of additional fields to
     /// append; values are serialised according to their `std.json.Value` type.
     pub fn emit(self: *ProcessLogger, event: LogEvent, extra: ?std.json.ObjectMap) !void {
+        // warden-b4h: per-minute byte-rate quota. Roll the window, then drop
+        // over-budget records (one marker per window keeps the drop observable).
+        if (self.max_bytes_per_min > 0) {
+            const now = clock.nowMs();
+            if (now - self.window_start_ms >= 60_000) {
+                self.window_start_ms = now;
+                self.bytes_this_window = 0;
+                self.quota_marker_written = false;
+            }
+            if (self.bytes_this_window >= self.max_bytes_per_min) {
+                if (!self.quota_marker_written) {
+                    self.quota_marker_written = true;
+                    self.seq += 1;
+                    self.file_writer.interface.print(
+                        "{{\"ts\":{d},\"beam\":{d},\"pid\":{d},\"seq\":{d},\"event\":\"log_quota_exceeded\"}}\n",
+                        .{ now, self.beam_id, self.pid, self.seq },
+                    ) catch {};
+                }
+                return;
+            }
+        }
+
+        const before = self.file_writer.pos + self.file_writer.interface.end;
         self.seq += 1;
         const ts = clock.nowMs();
         const w = &self.file_writer.interface;
@@ -361,6 +399,11 @@ pub const ProcessLogger = struct {
         }
 
         try w.writeAll("}\n");
+
+        // warden-b4h: account this record toward the per-minute byte window.
+        if (self.max_bytes_per_min > 0) {
+            self.bytes_this_window += (self.file_writer.pos + self.file_writer.interface.end) - before;
+        }
 
         // warden-ga2: roll the log once it grows past the threshold. Count both
         // flushed bytes (writer.pos) and buffered-but-unflushed bytes

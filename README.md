@@ -173,11 +173,12 @@ describes the runtime as implemented today, and is explicit about what is
   emits a policy event; the scheduler then admits a quarantined process **last**,
   but it does **not** preempt one that is already running or stop it from
   accepting messages. To actually halt a process, use `pause`.
-- **Log size is bounded by rotation; the rate quota is not.** Each process's
-  active NDJSON log rolls to `<name>.log.1` at 1 MiB (older rotations shift up to
-  3, oldest dropped), bounding per-process disk to ~4 MiB. The per-minute
-  byte-rate quota (`max_log_bytes_per_min`) is **not** enforced — there is no
-  throttle or drop on burst rate.
+- **Log size and rate are both bounded.** Each process's active NDJSON log rolls
+  to `<name>.log.1` at 1 MiB (older rotations shift up to 3, oldest dropped),
+  bounding per-process disk to ~4 MiB. The per-minute byte-rate quota
+  (`max_log_bytes_per_min`, default 1 MiB/min from the process policy) is
+  enforced by **dropping** over-budget records for the rest of the minute,
+  writing one `log_quota_exceeded` marker so the drop is observable.
 - **Policy events are exposed via the control plane.** Promote/demote/quarantine
   record a structured event in the policy engine (from both in-process and
   control-plane callers); the `policy.events` control RPC returns them per beam,
