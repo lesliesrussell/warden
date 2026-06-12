@@ -183,3 +183,31 @@ test "log rotates past rotate_at threshold" {
     const st = try cur.stat(std.testing.io);
     try std.testing.expect(st.size < 40 * 200);
 }
+
+// warden-b4h
+// Over the per-minute byte quota, records are dropped and a single
+// log_quota_exceeded marker is written for the window.
+test "log rate quota drops over-budget records with a marker" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var log = try logger.ProcessLogger.init(std.testing.io, allocator, 1, 100, tmp.dir);
+    defer log.deinit();
+    log.max_bytes_per_min = 200; // tiny window budget
+
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        try log.emit(.{ .spawn = .{} }, null);
+    }
+    try log.flush();
+
+    const data = try tmp.dir.readFileAlloc(std.testing.io, "1-100.log", allocator, .limited(1 << 20));
+    defer allocator.free(data);
+
+    // Exactly one quota marker, and fewer than all 40 records were written.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, data, "log_quota_exceeded"));
+    const spawn_records = std.mem.count(u8, data, "\"event\":\"spawn\"");
+    try std.testing.expect(spawn_records < 40);
+    try std.testing.expect(spawn_records > 0);
+}
