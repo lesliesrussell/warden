@@ -168,7 +168,10 @@ describes the runtime as implemented today, and is explicit about what is
   FIFO within a class. But the scheduler is **not preemptive** — a running task
   holds its worker thread until it returns — so promoting an *already-running*
   process does not interrupt others, and class only changes outcomes under worker
-  saturation.
+  saturation. Cooperative (non-preemptive) scheduling is a **deliberate design
+  choice**, like many runtimes: there is no time-slice interruption of running
+  tasks; use `pause`/`kill` to stop one. (The reduction counter exists for future
+  cooperative yield points, not OS-level preemption.)
 - **Quarantine demotes, it does not stop.** Quarantine sets the `tiny` class and
   emits a policy event; the scheduler then admits a quarantined process **last**,
   but it does **not** preempt one that is already running or stop it from
